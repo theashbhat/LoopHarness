@@ -2160,7 +2160,7 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         return 100
     }
 
-    // MARK: - Long-press context menu (branch conversation)
+    // MARK: - Long-press context menu (branch conversation + replay audio)
 
     func tableView(_ tableView: UITableView,
                    contextMenuConfigurationForRowAt indexPath: IndexPath,
@@ -2171,15 +2171,38 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         // Only user and assistant messages make sense as branch points.
         guard message.role == "user" || message.role == "assistant" else { return nil }
 
-        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            var actions: [UIMenuElement] = []
+
             let branchAction = UIAction(
                 title: "Branch conversation from here",
                 image: UIImage(systemName: "arrow.triangle.branch")
             ) { [weak self] _ in
                 self?.branchConversation(upToVisibleIndex: indexPath.row)
             }
-            return UIMenu(title: "", children: [branchAction])
+            actions.append(branchAction)
+
+            if self?.messageHasReplayableAudio(message) == true {
+                let replayAction = UIAction(
+                    title: "Replay Audio",
+                    image: UIImage(systemName: "speaker.wave.2")
+                ) { [weak self] _ in
+                    self?.playMessageSynthesizer(message: message)
+                }
+                actions.append(replayAction)
+            }
+
+            return UIMenu(title: "", children: actions)
         }
+    }
+
+    /// Whether a message has content that can be spoken by the TTS pipeline.
+    /// Returns true for assistant messages whose sanitized text is non-empty.
+    /// Internal (not private) so LoopIOSTests can verify eligibility logic.
+    func messageHasReplayableAudio(_ message: MessageStruct) -> Bool {
+        guard message.role == "assistant" else { return false }
+        let cleaned = MessagingVC.speechSanitizer.sanitize(message.content)
+        return !cleaned.isEmpty
     }
 
     /// Create a new conversation seeded with every message (including system
