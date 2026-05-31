@@ -308,7 +308,34 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         guard let convId = currentConversationEntity?.id else { return filtered }
         return ContextCompactor.compactedMessages(all: filtered, conversationId: convId)
     }
-    
+
+    /// Build the LLM context from the *persisted store* for a specific
+    /// conversation. Used when the user has switched away from the
+    /// conversation that owns an in-flight request — reading from
+    /// `self.messages` (via `chatContextMessages`) would give the wrong
+    /// context because the in-memory array now holds the new conversation.
+    private func storedChatContextMessages(for conversationId: String) -> [MessageStruct] {
+        guard let conversation = conversationManager.getConversation(by: conversationId) else {
+            return [messages[0]]
+        }
+        var result: [MessageStruct] = [messages[0]]
+        for msg in conversation.messages {
+            result.append(conversationManager.messageStruct(from: msg))
+        }
+        let filtered = result.filter { $0.onboardingCard == nil }
+        return ContextCompactor.compactedMessages(all: filtered, conversationId: conversationId)
+    }
+
+    /// Returns `chatContextMessages` when the user is still viewing
+    /// `conversationId`, otherwise falls back to the persisted store.
+    private func contextMessages(for conversationId: String?) -> [MessageStruct] {
+        guard let convId = conversationId else { return chatContextMessages }
+        if currentConversationEntity?.id == convId {
+            return chatContextMessages
+        }
+        return storedChatContextMessages(for: convId)
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -879,15 +906,20 @@ extension MessagingVC: MessageBoxDelegate {
             self.newMessageSent()
         }
 
-        self.ai_state = .defaultThinking
-        VoiceLoopCoordinator.shared.setState(.thinking)
+        if isStillViewing {
+            self.ai_state = .defaultThinking
+            VoiceLoopCoordinator.shared.setState(.thinking)
+        }
         DispatchQueue.main.async {
             if isStillViewing { self.tableView.reloadData() }
         }
 
         let reqConvId = conversation.id
-        Cloud.connection.chat(messages: self.chatContextMessages) { responseMessage, error in
-            self.ai_state = .None
+        let context = self.contextMessages(for: reqConvId)
+        Cloud.connection.chat(messages: context) { responseMessage, error in
+            if self.currentConversationEntity?.id == reqConvId {
+                self.ai_state = .None
+            }
             if let responseMessage = responseMessage {
                 self.processMessage(message: responseMessage, requestConversationId: reqConvId)
             }
@@ -898,7 +930,7 @@ extension MessagingVC: MessageBoxDelegate {
                         print("Apple Intelligence enabled")
                         let session = LanguageModelSession()
 
-                        let singlePrompt = self.makeSinglePrompt(from: self.chatContextMessages)
+                        let singlePrompt = self.makeSinglePrompt(from: context)
                         Task {
                             do {
                                 let response = try await session.respond(to: singlePrompt)
@@ -1023,8 +1055,11 @@ extension MessagingVC: MessageBoxDelegate {
             conversationId: requestConversationId
         )
 
-        Cloud.connection.chat(messages: self.chatContextMessages) { responseMessage, error in
-            self.ai_state = .None
+        let initialContext = self.chatContextMessages
+        Cloud.connection.chat(messages: initialContext) { responseMessage, error in
+            if self.currentConversationEntity?.id == requestConversationId {
+                self.ai_state = .None
+            }
             if var responseMessage = responseMessage {
                 // Hard-trigger notice: append a one-liner so the user knows
                 // compaction is running in the background.
@@ -1041,7 +1076,7 @@ extension MessagingVC: MessageBoxDelegate {
                         print("Apple Intelligence enabled")
                         let session = LanguageModelSession()
 
-                        let singlePrompt = self.makeSinglePrompt(from: self.chatContextMessages)
+                        let singlePrompt = self.makeSinglePrompt(from: self.contextMessages(for: requestConversationId))
                         Task {
                             do {
                                 print(singlePrompt)
@@ -1166,9 +1201,11 @@ extension MessagingVC: MessageBoxDelegate {
                 ActiveRequestTracker.shared.markIdle(id)
             }
             guard message.content.count > 0 else {
-                self.ai_state = .None
-                VoiceLoopCoordinator.shared.setState(.idle)
-                DispatchQueue.main.async { self.tableView.reloadData() }
+                if isViewing {
+                    self.ai_state = .None
+                    VoiceLoopCoordinator.shared.setState(.idle)
+                    DispatchQueue.main.async { self.tableView.reloadData() }
+                }
                 return
             }
 
@@ -1211,10 +1248,10 @@ extension MessagingVC: MessageBoxDelegate {
         }
 
         // Assistant emitted ≥1 tool call(s).
-        if let firstCall = message.functions.first {
-            self.ai_state = .Thinking(text: self.statusText(for: firstCall))
-        }
         if isViewing {
+            if let firstCall = message.functions.first {
+                self.ai_state = .Thinking(text: self.statusText(for: firstCall))
+            }
             self.messages.append(message)
             DispatchQueue.main.async { self.tableView.reloadData() }
         }
@@ -1236,8 +1273,10 @@ extension MessagingVC: MessageBoxDelegate {
 
         DynamicSkillRegistry.shared.logHandler = { [weak self] _, line in
             DispatchQueue.main.async {
-                self?.ai_state = .Thinking(text: line)
-                self?.tableView.reloadData()
+                guard let self = self,
+                      self.currentConversationEntity?.id == convId else { return }
+                self.ai_state = .Thinking(text: line)
+                self.tableView.reloadData()
             }
         }
 
@@ -1248,7 +1287,7 @@ extension MessagingVC: MessageBoxDelegate {
                 summary: self.statusText(for: call),
                 detail: call.name
             )
-            self.dispatchCall(call) { [weak self] result in
+            self.dispatchCall(call, conversationId: convId) { [weak self] result in
                 guard let self = self else { return }
                 var r = result
                 if r.callId == nil { r.callId = call.callId }
@@ -1285,17 +1324,18 @@ extension MessagingVC: MessageBoxDelegate {
         if isViewing {
             currentConversationEntity = conversationManager.currentConversation
             self.newMessageSent()
-        }
-        self.ai_state = .defaultThinking
-        VoiceLoopCoordinator.shared.setState(.thinking)
-        if isViewing {
+            self.ai_state = .defaultThinking
+            VoiceLoopCoordinator.shared.setState(.thinking)
             DispatchQueue.main.async { self.tableView.reloadData() }
         }
 
         let reqConvId = conversation.id
-        Cloud.connection.chat(messages: self.chatContextMessages) { [weak self] responseMessage, error in
+        let context = self.contextMessages(for: reqConvId)
+        Cloud.connection.chat(messages: context) { [weak self] responseMessage, error in
             guard let self = self else { return }
-            self.ai_state = .None
+            if self.currentConversationEntity?.id == reqConvId {
+                self.ai_state = .None
+            }
             if let responseMessage = responseMessage {
                 self.processMessage(message: responseMessage, requestConversationId: reqConvId)
                 return
@@ -1323,18 +1363,20 @@ extension MessagingVC: MessageBoxDelegate {
     /// routed inline (intentionally excluded from `SkillDispatcher` so
     /// background-scheduled jobs can't spawn sub-agents).
     private func dispatchCall(_ call: FunctionCallStruct,
+                              conversationId: String? = nil,
                               completion: @escaping (MessageStruct) -> Void) {
         // Stamp the originating conversation onto the call so skills
         // that need parent-conversation context (SubAgentSkill,
         // TerminalSkill) read from there rather than the global
         // `currentConversation` pointer — see VoiceLoopCoordinator's
         // matching shim for the multi-tab Mac scenario this guards
-        // against. Cheap to populate on iOS even though the global
-        // would also work in single-thread terms; keeps the dispatch
-        // contract uniform across platforms.
+        // against. Prefer the explicitly-passed `conversationId`
+        // (captured at request time) over the live
+        // `currentConversationEntity` which tracks the user's active
+        // tab and may have changed since the model emitted the call.
         var call = call
         if call.conversationId == nil {
-            call.conversationId = currentConversationEntity?.id
+            call.conversationId = conversationId ?? currentConversationEntity?.id
         }
         if SubAgentSkill.shared.handles(functionName: call.name) {
             SubAgentSkill.shared.handle(functionCall: call, completion: completion)
