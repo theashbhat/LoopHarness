@@ -126,6 +126,12 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     // Side drawer
     private var sideDrawer: SideDrawerViewController?
     private var edgePanGestureRecognizer: UIPanGestureRecognizer!
+
+    // Unread indicator: conversation ids that received an assistant response
+    // while the user was viewing a *different* chat. Drives the green dot on
+    // the hamburger button; cleared when the user opens the side drawer.
+    private var unreadConversationIds: Set<String> = []
+    private weak var menuBadgeDot: UIView?
     
     // Edge pan gesture tracking
     private var isEdgePanActive = false
@@ -620,6 +626,12 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // conversation's request don't bleed into this one's in-memory table.
         activeRequestConversationId = nil
         ai_state = .None
+        // Stop the avatar's "thinking" animation — an in-flight request from
+        // the chat we just left must not keep the avatar spinning here.
+        VoiceLoopCoordinator.shared.setState(.idle)
+        // This chat is now on-screen; drop its unread flag.
+        unreadConversationIds.remove(conversation.id)
+        if unreadConversationIds.isEmpty { menuBadgeDot?.isHidden = true }
         ttsStatuses.removeAll()
         ttsStartTimes.removeAll()
         loadMessagesFromConversation(conversation)
@@ -645,6 +657,13 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         currentConversationEntity = newConversation
         conversationManager.currentConversation = newConversation
         activeRequestConversationId = nil
+        // Clear the "Thinking…" shimmer so an in-flight request from the chat
+        // we just left doesn't leak its state onto the fresh chat. Mirrors
+        // `loadConversation`; the previous request still completes, but its
+        // response handlers are `isViewing`-guarded and won't touch this VC.
+        ai_state = .None
+        // Stop the avatar's "thinking" animation for the same reason.
+        VoiceLoopCoordinator.shared.setState(.idle)
         ttsStatuses.removeAll()
         ttsStartTimes.removeAll()
         loadDefaultMessage()
@@ -1218,6 +1237,13 @@ extension MessagingVC: MessageBoxDelegate {
             }
             conversationManager.addMessage(message, to: conversation)
 
+            if !isViewing {
+                // Response arrived for a chat the user has navigated away from.
+                // Surface a green dot on the hamburger so they know there's
+                // something new waiting in another conversation.
+                markConversationUnread(conversation.id)
+            }
+
             if isViewing {
                 currentConversationEntity = conversationManager.currentConversation
                 self.messages.append(message)
@@ -1624,12 +1650,29 @@ extension MessagingVC {
     func setupNav() {
         self.title = "Intel"
 
-        // Left bar button
-        let sideBarButton = UIBarButtonItem(image: UIImage(systemName: "line.3.horizontal"), style: .done, target: self, action: #selector(leftBarButtonTapped))
-        sideBarButton.tintColor = .secondarySystemBackground
+        // Left bar button — custom view so we can overlay an unread dot.
+        let menuButton = UIButton(type: .system)
+        menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
+        // A custom-view button does NOT inherit the navigation bar's (white)
+        // tint the way a plain bar item does, so set a readable color
+        // explicitly — `.label` matches the other nav icons in dark mode.
+        menuButton.tintColor = .label
+        menuButton.addTarget(self, action: #selector(leftBarButtonTapped), for: .touchUpInside)
+        menuButton.frame = CGRect(x: 0, y: 0, width: 32, height: 32)
+
+        let dot = UIView(frame: CGRect(x: 22, y: 3, width: 9, height: 9))
+        dot.backgroundColor = .systemGreen
+        dot.layer.cornerRadius = 4.5
+        // Thin border so the dot reads against the green of an avatar/icon.
+        dot.layer.borderWidth = 1.5
+        dot.layer.borderColor = UIColor.systemBackground.cgColor
+        dot.isUserInteractionEnabled = false
+        dot.isHidden = unreadConversationIds.isEmpty
+        menuButton.addSubview(dot)
+        self.menuBadgeDot = dot
+
+        let sideBarButton = UIBarButtonItem(customView: menuButton)
         self.navigationItem.leftBarButtonItems = [sideBarButton]
-        
-        self.navigationItem.leftBarButtonItem?.tintColor = .secondarySystemBackground
         
         // Right bar buttons: speaker (now opens a settings menu) + edit.
         // Gear + speaker land in a system-grouped pill, which dims their
@@ -1876,6 +1919,26 @@ extension MessagingVC {
     @objc func leftBarButtonTapped() {
         showSideDrawer()
     }
+
+    /// Flag a chat as having a fresh, unseen assistant response. Shows the
+    /// green dot on the hamburger button. Called when a response lands in a
+    /// conversation the user isn't currently viewing.
+    func markConversationUnread(_ conversationId: String) {
+        DispatchQueue.main.async {
+            self.unreadConversationIds.insert(conversationId)
+            self.menuBadgeDot?.isHidden = false
+        }
+    }
+
+    /// Clear the unread dot. The user has opened the drawer (or switched into
+    /// the chat), so the "something new arrived elsewhere" hint has served its
+    /// purpose.
+    func clearMenuBadge() {
+        DispatchQueue.main.async {
+            self.unreadConversationIds.removeAll()
+            self.menuBadgeDot?.isHidden = true
+        }
+    }
     
     @objc func settingsButtonTapped() {
         let settings = SettingsVC()
@@ -1953,7 +2016,10 @@ extension MessagingVC {
     
     private func showSideDrawerForEdgePan() {
         guard sideDrawer == nil else { return }
-        
+
+        // Opening the conversation list — the unread hint has been seen.
+        clearMenuBadge()
+
         sideDrawer = SideDrawerViewController()
         sideDrawer?.delegate = self
         
@@ -2046,6 +2112,9 @@ extension MessagingVC {
     // MARK: - Side Drawer Methods
     
     private func showSideDrawer(initialTab: String? = nil) {
+        // Opening the conversation list — the unread hint has been seen.
+        clearMenuBadge()
+
         if let existing = sideDrawer {
             // Drawer already on-screen — just switch tabs in place.
             if let tab = initialTab { existing.selectTab(tab) }
@@ -2229,7 +2298,19 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
                     title: "Replay Audio",
                     image: UIImage(systemName: "speaker.wave.2")
                 ) { [weak self] _ in
-                    self?.playMessageSynthesizer(message: message)
+                    guard let self = self else { return }
+                    // If voice playback is off, replaying audio re-enables it
+                    // and switches to the on-device system voice so the user
+                    // hears something immediately (no API key required).
+                    // Otherwise playMessageSynthesizer would early-return on
+                    // the mute check and nothing would play. Both setters
+                    // refresh the nav-bar speaker icon + menu so the change is
+                    // reflected in the UI.
+                    if self.isMuted {
+                        self.isMuted = false
+                        self.ttsProvider = .system
+                    }
+                    self.playMessageSynthesizer(message: message)
                 }
                 actions.append(replayAction)
             }

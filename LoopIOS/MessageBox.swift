@@ -1232,7 +1232,7 @@ extension MessageBox {
             attachButton.tintColor = .secondaryLabel
             attachButton.backgroundColor = .clear
         } else {
-            attachButton.setImage(UIImage(systemName: "plus.circle ", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 26, weight: .regular))), for: .normal)
+            attachButton.setImage(UIImage(systemName: "plus.circle", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 26, weight: .regular))), for: .normal)
             attachButton.tintColor = .secondaryLabel
             attachButton.backgroundColor = .clear
         }
