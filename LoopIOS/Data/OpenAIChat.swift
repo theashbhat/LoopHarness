@@ -39,6 +39,19 @@ final class OpenAIChat {
 
     private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
 
+    // MARK: - Prompt caching
+    //
+    // OpenAI applies automatic prefix caching for prompts ≥1024 tokens
+    // when the prefix is identical across requests. No explicit API
+    // parameter is required. To maximize cache hit rate:
+    //   1. System message (stable) comes first.
+    //   2. Tool schemas (stable) are sent in a consistent order.
+    //   3. Dynamic/volatile content (user turns, timestamps) comes last.
+    // The harness already composes messages in this order (system →
+    // history → user), so we just need to keep that invariant and not
+    // shuffle tools between requests. Cache hits are reported in
+    // `usage.prompt_tokens_details.cached_tokens`.
+
     /// Maps `[MessageStruct]` → OpenAI chat messages, sends the
     /// (already OpenAI-shaped) tool schemas, and parses the reply back into a
     /// `MessageStruct` — emitting a `FunctionCallStruct` when the model wants
@@ -58,6 +71,8 @@ final class OpenAIChat {
         // somehow called for a non-OpenAI selection (routing shouldn't let
         // that happen).
         let modelID = ModelSelectionStore.current.apiModelID ?? "gpt-5.5"
+
+        let requestStart = CFAbsoluteTimeGetCurrent()
 
         var body: [String: Any] = [
             "model": modelID,
@@ -96,9 +111,11 @@ final class OpenAIChat {
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("OpenAIChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count)")
+        print("OpenAIChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count) prefix_caching=auto")
         let task = session.dataTask(with: req) { data, response, error in
+            let latency = CFAbsoluteTimeGetCurrent() - requestStart
             if let error = error {
+                print("OpenAIChat: FAILED after \(String(format: "%.2f", latency))s — \(error.localizedDescription)")
                 completion(nil, Self.error("Network error talking to OpenAI: \(error.localizedDescription)"))
                 return
             }
@@ -149,6 +166,17 @@ final class OpenAIChat {
                 usage = TokenUsage(promptTokens: prompt,
                                    completionTokens: comp,
                                    totalTokens: total)
+                // OpenAI reports cached prefix tokens under
+                // prompt_tokens_details.cached_tokens when auto-caching
+                // kicks in (prompts ≥1024 tokens with a stable prefix).
+                let cached: Int
+                if let details = u["prompt_tokens_details"] as? [String: Any],
+                   let c = details["cached_tokens"] as? Int {
+                    cached = c
+                } else {
+                    cached = 0
+                }
+                print("OpenAIChat: latency=\(String(format: "%.2f", latency))s prompt=\(prompt) completion=\(comp) cached_tokens=\(cached)")
             }
             let msg = MessageStruct(
                 role: "assistant",

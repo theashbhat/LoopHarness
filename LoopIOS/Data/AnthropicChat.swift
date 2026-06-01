@@ -38,6 +38,10 @@ final class AnthropicChat {
 
     private let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     private let anthropicVersion = "2023-06-01"
+    /// Opt-in to prompt caching. Sent as a space-separated list in the
+    /// `anthropic-beta` header; the API ignores unknown feature flags so
+    /// this is forward-compatible.
+    private let betaFeatures = "prompt-caching-2024-07-31"
     /// Cap on a single completion. Generous enough for long agent turns
     /// without inviting runaway generations; required by the API.
     private let maxTokens = 4096
@@ -55,17 +59,44 @@ final class AnthropicChat {
 
         let modelID = ModelSelectionStore.current.apiModelID ?? "claude-sonnet-4-6"
         let (system, wire) = Self.wirePayload(from: messages)
+        let requestStart = CFAbsoluteTimeGetCurrent()
 
         var body: [String: Any] = [
             "model": modelID,
             "max_tokens": maxTokens,
             "messages": wire,
         ]
+
+        // --- Prompt caching: system prompt ---
+        // Anthropic's prompt caching requires `system` to be an array of
+        // content blocks (not a plain string) when cache_control is used.
+        // We mark the entire system prompt as a single cacheable block so
+        // the stable SOUL/USER/MEMORY/AGENTS/TOOLS prefix gets a server-
+        // side cache hit on subsequent turns (5-minute TTL, typically
+        // saving 90%+ of input tokens on multi-turn conversations).
         if let system = system, !system.isEmpty {
-            body["system"] = system
+            body["system"] = [
+                [
+                    "type": "text",
+                    "text": system,
+                    "cache_control": ["type": "ephemeral"],
+                ] as [String: Any]
+            ]
         }
+
+        // --- Prompt caching: tool schemas ---
+        // Tool definitions are stable across turns (they only change when
+        // a dynamic skill is added/removed). Mark the last tool with a
+        // cache breakpoint so the entire tool list is cached together with
+        // the system prompt.
         if let tools = tools, !tools.isEmpty {
-            body["tools"] = Self.anthropicTools(from: tools)
+            var anthropicTools = Self.anthropicTools(from: tools)
+            if !anthropicTools.isEmpty {
+                var lastTool = anthropicTools[anthropicTools.count - 1]
+                lastTool["cache_control"] = ["type": "ephemeral"]
+                anthropicTools[anthropicTools.count - 1] = lastTool
+            }
+            body["tools"] = anthropicTools
             body["tool_choice"] = ["type": "auto"]
         }
 
@@ -78,13 +109,16 @@ final class AnthropicChat {
         req.httpMethod = "POST"
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
+        req.setValue(betaFeatures, forHTTPHeaderField: "anthropic-beta")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("AnthropicChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count)")
+        print("AnthropicChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count) caching=enabled")
         let task = session.dataTask(with: req) { data, response, error in
+            let latency = CFAbsoluteTimeGetCurrent() - requestStart
             if let error = error {
+                print("AnthropicChat: FAILED after \(String(format: "%.2f", latency))s — \(error.localizedDescription)")
                 completion(nil, Self.error("Network error talking to Anthropic: \(error.localizedDescription)"))
                 return
             }
@@ -126,6 +160,10 @@ final class AnthropicChat {
                 usage = TokenUsage(promptTokens: input,
                                    completionTokens: output,
                                    totalTokens: input + output)
+                // Log cache performance when the API reports it.
+                let cacheCreation = u["cache_creation_input_tokens"] as? Int ?? 0
+                let cacheRead = u["cache_read_input_tokens"] as? Int ?? 0
+                print("AnthropicChat: latency=\(String(format: "%.2f", latency))s input=\(input) output=\(output) cache_creation=\(cacheCreation) cache_read=\(cacheRead)")
             }
             let msg = MessageStruct(
                 role: "assistant",
@@ -398,6 +436,15 @@ final class AnthropicChat {
                 "data": data.base64EncodedString(),
             ],
         ]
+    }
+
+    // MARK: - Test support
+
+    /// Expose `anthropicTools(from:)` for unit tests. Production code should
+    /// call through `chat(messages:tools:completion:)` which applies caching
+    /// annotations on top.
+    static func testableAnthropicTools(from tools: [[String: Any]]) -> [[String: Any]] {
+        anthropicTools(from: tools)
     }
 
     // MARK: - Errors

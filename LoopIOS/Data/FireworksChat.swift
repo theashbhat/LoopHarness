@@ -34,6 +34,16 @@ final class FireworksChat {
 
     private let endpoint = URL(string: "https://api.fireworks.ai/inference/v1/chat/completions")!
 
+    // MARK: - Prompt caching
+    //
+    // Fireworks supports automatic prefix caching on their OpenAI-
+    // compatible endpoint. Like OpenAI, no explicit request parameter
+    // is needed — the server detects repeated prefixes and serves them
+    // from KV cache. To maximize hit rate we rely on the same ordering
+    // invariant the harness already maintains: system → tools → history
+    // → latest user message. Fireworks does not currently expose a
+    // response field reporting cache hits, so we log latency only.
+
     private let maxCompletionTokens = 4096
 
     func chat(messages: [MessageStruct],
@@ -48,6 +58,7 @@ final class FireworksChat {
         }
 
         let modelID = ModelSelectionStore.current.apiModelID ?? "accounts/fireworks/models/kimi-k2p6"
+        let requestStart = CFAbsoluteTimeGetCurrent()
 
         var body: [String: Any] = [
             "model": modelID,
@@ -71,9 +82,11 @@ final class FireworksChat {
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("FireworksChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count)")
+        print("FireworksChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count) prefix_caching=auto")
         let task = session.dataTask(with: req) { data, response, error in
+            let latency = CFAbsoluteTimeGetCurrent() - requestStart
             if let error = error {
+                print("FireworksChat: FAILED after \(String(format: "%.2f", latency))s — \(error.localizedDescription)")
                 completion(nil, Self.error("Network error talking to Fireworks: \(error.localizedDescription)"))
                 return
             }
@@ -118,6 +131,7 @@ final class FireworksChat {
                 usage = TokenUsage(promptTokens: prompt,
                                    completionTokens: comp,
                                    totalTokens: total)
+                print("FireworksChat: latency=\(String(format: "%.2f", latency))s prompt=\(prompt) completion=\(comp)")
             }
             let msg = MessageStruct(
                 role: "assistant",
