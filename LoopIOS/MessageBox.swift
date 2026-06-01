@@ -33,9 +33,9 @@ class MessageBox: UIView {
     /// text — enough that most messages don't need to scroll, but small
     /// enough that pasting a wall of text doesn't push the chat off-screen.
     fileprivate static let inputMaxHeight: CGFloat = 140
-    let sendButton = UIButton()
-    /// Paperclip button on the left side of the input bar. Always visible;
-    /// tapping opens the camera / photo library / files action sheet.
+    /// Files button — lives inside the input field on the left. Opens the
+    /// camera / photo library / files action sheet at rest; becomes a red Stop
+    /// button while recording.
     let attachButton = UIButton()
     let keyboardButton = UIButton()
     let micButton = UIButton()
@@ -66,7 +66,6 @@ class MessageBox: UIView {
     // Recording UI elements
     let recordingContainerView = UIView()
     let waveformView = UIView()
-    let recordingSendButton = UIButton()
     let transcribingLabel = UILabel()
     
     // Recording state
@@ -157,7 +156,7 @@ class MessageBox: UIView {
         micButton.translatesAutoresizingMaskIntoConstraints = false
         self.addSubview(micButton)
         
-        let views = [textView, sendButton, keyboardButton, emptyLabel]
+        let views = [textView, keyboardButton, emptyLabel]
         for view in views {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.containerView.addSubview(view)
@@ -174,7 +173,7 @@ class MessageBox: UIView {
             attachmentChipView.addSubview(v)
         }
         
-        let recordingViews = [waveformView, recordingSendButton, transcribingLabel]
+        let recordingViews = [waveformView, transcribingLabel]
         for view in recordingViews {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.recordingContainerView.addSubview(view)
@@ -183,24 +182,52 @@ class MessageBox: UIView {
         let chipBottom = attachmentChipView.bottomAnchor.constraint(equalTo: containerView.topAnchor, constant: -8)
         self.attachmentChipBottomConstraint = chipBottom
 
-        NSLayoutConstraint.activate([
-            // Attach button constraints - outside container, to the left, aligned to bottom
-            attachButton.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 15),
-            attachButton.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -3),
-            attachButton.widthAnchor.constraint(equalToConstant: 40),
-            attachButton.heightAnchor.constraint(equalToConstant: 40),
+        // Empty single-line height of the input field. The external right
+        // action button matches this exactly and stays this size as the field
+        // grows. textView insets are tuned (below) so the field's natural
+        // empty height lands here.
+        let emptyFieldHeight: CGFloat = 50
 
-            // Mic button constraints - outside container, to the right, aligned to bottom
+        NSLayoutConstraint.activate([
+            // Input container — full width on the left; its trailing edge stops
+            // just before the external right action button.
+            containerView.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 15),
+            containerView.topAnchor.constraint(equalTo: self.topAnchor, constant: 15),
+            containerView.trailingAnchor.constraint(equalTo: micButton.leadingAnchor, constant: -10),
+            containerView.bottomAnchor.constraint(equalTo: self.safeAreaLayoutGuide.bottomAnchor, constant: -15),
+            containerView.heightAnchor.constraint(greaterThanOrEqualToConstant: emptyFieldHeight),
+
+            // Recording container occupies the same frame as the input
+            // container so swapping between them keeps the bar in place.
+            recordingContainerView.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 15),
+            recordingContainerView.topAnchor.constraint(equalTo: self.topAnchor, constant: 15),
+            recordingContainerView.trailingAnchor.constraint(equalTo: micButton.leadingAnchor, constant: -10),
+            recordingContainerView.bottomAnchor.constraint(equalTo: self.safeAreaLayoutGuide.bottomAnchor, constant: -15),
+            recordingContainerView.heightAnchor.constraint(greaterThanOrEqualToConstant: emptyFieldHeight),
+
+            // Right action button (mic / send) — OUTSIDE the field. Fixed at the
+            // empty field height and bottom-aligned so it stays put (same size)
+            // as the field grows.
             micButton.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -15),
-            micButton.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -3),
-            micButton.widthAnchor.constraint(equalToConstant: 50),
-            micButton.heightAnchor.constraint(equalToConstant: 50),
+            micButton.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            micButton.widthAnchor.constraint(equalToConstant: emptyFieldHeight),
+            micButton.heightAnchor.constraint(equalToConstant: emptyFieldHeight),
+
+            // Files button — inside the field on the left, bottom-aligned. Its
+            // 7pt inset centers the 36pt button in the empty 50pt field, and it
+            // stays at the bottom as the field grows.
+            attachButton.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 8),
+            attachButton.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -7),
+            attachButton.widthAnchor.constraint(equalToConstant: 36),
+            attachButton.heightAnchor.constraint(equalToConstant: 36),
 
             // Attachment chip sits above containerView; pinned 8pt above its top
             // when visible, and constrained to a 0 height when hidden via the
             // height constraint below.
             attachmentChipView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 4),
-            attachmentChipView.trailingAnchor.constraint(lessThanOrEqualTo: containerView.trailingAnchor, constant: -4),
+            // Stretch the chip all the way to the right edge of the send button
+            // rather than stopping at the field's trailing edge.
+            attachmentChipView.trailingAnchor.constraint(equalTo: micButton.trailingAnchor),
             attachmentChipView.heightAnchor.constraint(equalToConstant: 48),
             chipBottom,
 
@@ -218,62 +245,34 @@ class MessageBox: UIView {
             attachmentRemoveButton.widthAnchor.constraint(equalToConstant: 24),
             attachmentRemoveButton.heightAnchor.constraint(equalToConstant: 24),
 
-            // Container view constraints - between attach button (left) and mic button (right)
-            containerView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 10),
-            containerView.topAnchor.constraint(equalTo: self.topAnchor, constant: 15),
-            containerView.trailingAnchor.constraint(equalTo: micButton.leadingAnchor, constant: -10),
-            containerView.bottomAnchor.constraint(equalTo: self.safeAreaLayoutGuide.bottomAnchor, constant: -15),
-            containerView.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
-            
-            // Recording container view constraints (initially hidden).
-            // Min-height matches the normal input container so swapping in
-            // and out keeps the bar at the same visual size.
-            recordingContainerView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 10),
-            recordingContainerView.topAnchor.constraint(equalTo: self.topAnchor, constant: 15),
-            recordingContainerView.trailingAnchor.constraint(equalTo: micButton.leadingAnchor, constant: -10),
-            recordingContainerView.bottomAnchor.constraint(equalTo: self.safeAreaLayoutGuide.bottomAnchor, constant: -15),
-            recordingContainerView.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
-            
-            // Normal UI constraints - text field and send button inside container
-            textView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 10),
-            textView.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -10),
-            textView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 10),
-            textView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -10),
+            // Text view — between the in-field files button and the field's
+            // trailing edge. Insets tuned so the empty field is ~emptyFieldHeight.
+            textView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 8),
+            textView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -14),
+            textView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 8),
+            textView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -8),
             textView.heightAnchor.constraint(greaterThanOrEqualToConstant: 20),
             // Cap the input at ~6 lines of body text. Once content exceeds
             // this, `textViewDidChange` flips `isScrollEnabled` so the user
             // scrolls inside the bounded view instead of the input eating
             // the whole chat. See `MessageBox.inputMaxHeight`.
             textView.heightAnchor.constraint(lessThanOrEqualToConstant: MessageBox.inputMaxHeight),
-            
-            sendButton.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -10),
-            sendButton.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -10),
-            sendButton.widthAnchor.constraint(equalToConstant: 40),
-            sendButton.heightAnchor.constraint(equalToConstant: 40),
 
             emptyLabel.leadingAnchor.constraint(equalTo: textView.leadingAnchor, constant: 5),
             emptyLabel.centerYAnchor.constraint(equalTo: textView.centerYAnchor),
-            
-            // Recording UI constraints. Slim vertical insets so the bars
-            // fill almost the full height of the recording container —
-            // matches the bigger visual presence the Mac waveform has
-            // relative to its bar.
-            waveformView.leadingAnchor.constraint(equalTo: recordingContainerView.leadingAnchor, constant: 10),
-            waveformView.trailingAnchor.constraint(equalTo: recordingSendButton.leadingAnchor, constant: -5),
+
+            // Waveform fills the field between the (now Stop) files button and
+            // the field's trailing edge during recording.
+            waveformView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 8),
+            waveformView.trailingAnchor.constraint(equalTo: recordingContainerView.trailingAnchor, constant: -12),
             waveformView.topAnchor.constraint(equalTo: recordingContainerView.topAnchor, constant: 3),
             waveformView.bottomAnchor.constraint(equalTo: recordingContainerView.bottomAnchor, constant: -3),
-            
-            recordingSendButton.trailingAnchor.constraint(equalTo: recordingContainerView.trailingAnchor, constant: -10),
-            recordingSendButton.centerYAnchor.constraint(equalTo: recordingContainerView.centerYAnchor),
-            recordingSendButton.widthAnchor.constraint(equalToConstant: 50),
-            recordingSendButton.heightAnchor.constraint(equalToConstant: 50),
-            
+
             transcribingLabel.centerXAnchor.constraint(equalTo: recordingContainerView.centerXAnchor),
             transcribingLabel.centerYAnchor.constraint(equalTo: recordingContainerView.centerYAnchor)
         ])
         
         keyboardButton.isHidden = true
-        sendButton.setContentHuggingPriority(.required, for: .horizontal)
         attachButton.setContentHuggingPriority(.required, for: .horizontal)
         micButton.setContentHuggingPriority(.required, for: .horizontal)
         
@@ -290,7 +289,7 @@ class MessageBox: UIView {
             self.sendButtonTapped()
         }
         textView.backgroundColor = UIColor.clear
-        textView.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         textView.backgroundColor = .secondarySystemBackground
         // Container view styling - ChatGPT-like rounded container
@@ -312,19 +311,11 @@ class MessageBox: UIView {
         recordingContainerView.isHidden = true
         recordingContainerView.clipsToBounds = true
         
-        // Button setup - ChatGPT-like send button with up arrow
-        sendButton.setImage(UIImage(systemName: "arrow.up", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 18, weight: .semibold))), for: .normal)
-        sendButton.tintColor = .secondaryLabel
-        sendButton.backgroundColor = UIColor.tertiarySystemBackground
-        sendButton.layer.cornerRadius = 20
-        sendButton.addTarget(self, action: #selector(sendButtonTapped), for: .touchUpInside)
-
-        // Attach button — paperclip, standalone on the left. Styled to
-        // match the mic button's circular treatment.
-        attachButton.setImage(UIImage(systemName: "paperclip", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 18, weight: .regular))), for: .normal)
-        attachButton.tintColor = .secondaryLabel
-        attachButton.backgroundColor = UIColor.systemGray6
-        attachButton.layer.cornerRadius = 20
+        // Files button — lives inside the field on the left. Resting look is a
+        // plain paperclip; it morphs into a red circular Stop button while
+        // recording (see updateLeftButton). 36pt to fit inside the field.
+        attachButton.layer.cornerRadius = 18
+        attachButton.layer.cornerCurve = .continuous
         attachButton.addTarget(self, action: #selector(attachButtonTapped), for: .touchUpInside)
 
         // Chip styling — pill-shaped capsule with a thumbnail, filename, and
@@ -352,11 +343,12 @@ class MessageBox: UIView {
         keyboardButton.tintColor = .secondaryLabel
         keyboardButton.addTarget(self, action: #selector(keyboardButtonTapped), for: .touchUpInside)
         
-        // Mic button setup - separate button outside container on the right
-        micButton.setImage(UIImage(systemName: "mic.fill", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 20))), for: .normal)
-        micButton.tintColor = .secondaryLabel
-        micButton.backgroundColor = UIColor.systemGray6
+        // Right action button — lives OUTSIDE the field, sized to the empty
+        // field height (50). Resting look is a plain mic; it morphs into a blue
+        // Send button when there's text/attachment to send or while recording
+        // (see updateRightButton).
         micButton.layer.cornerRadius = 25
+        micButton.layer.cornerCurve = .continuous
         micButton.layer.borderWidth = 0
         // Touch-down fires the moment the finger lands — independent of whether
         // the press becomes a tap or a long-press. UIControl events coexist with
@@ -371,13 +363,6 @@ class MessageBox: UIView {
         micButton.addGestureRecognizer(micTapGesture)
         micButton.addGestureRecognizer(micLongPressGesture)
         
-        // Recording UI setup
-        recordingSendButton.setImage(UIImage(systemName: "arrow.up", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 22))), for: .normal)
-        recordingSendButton.tintColor = .white
-        recordingSendButton.backgroundColor = UIColor.systemBlue
-        recordingSendButton.layer.cornerRadius = 25
-        recordingSendButton.addTarget(self, action: #selector(recordingSendButtonTapped), for: .touchUpInside)
-
         // Waveform view is now just a layout slot — the bars themselves are
         // CALayer sublayers added on demand once the slot has a real width.
         // No background or corner styling so it blends with the container.
@@ -468,29 +453,28 @@ class MessageBox: UIView {
     }
     
     private func updateMicButtonAppearance() {
-        // Don't update if recording - recording state takes precedence
-        if currentState == .recording || isLongPressRecording {
-            return
-        }
-        
-        if isKeyboardVisible {
-            // Show keyboard dismiss icon
-            micButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 20))), for: .normal)
-            micButton.backgroundColor = UIColor.systemGray6
-        } else {
-            // Show mic icon
-            micButton.setImage(UIImage(systemName: "mic.fill", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 20))), for: .normal)
-            micButton.backgroundColor = UIColor.systemGray6
-        }
-        // Keep the button styled consistently
-        micButton.layer.cornerRadius = 25
-        micButton.tintColor = .secondaryLabel
+        // Both in-field buttons are driven from a single source of truth that
+        // accounts for recording / text / keyboard state.
+        refreshInputButtons()
     }
     
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
-    
+
+    /// The attachment chip floats *above* this view's bounds (it sits over the
+    /// input container, whose top is already at our top inset). Touches outside
+    /// our bounds are normally never routed here, so the chip's × button was
+    /// dead. Extend our touchable region to include the visible chip so its
+    /// remove button (and the rest of the chip) stays interactive.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if super.point(inside: point, with: event) { return true }
+        if !attachmentChipView.isHidden, attachmentChipView.frame.contains(point) {
+            return true
+        }
+        return false
+    }
+
     @objc func keyboardButtonTapped() {
         if textView.isFirstResponder {
             self.textView.resignFirstResponder()
@@ -501,33 +485,34 @@ class MessageBox: UIView {
     }
     
     @objc func micButtonTapped() {
-        // If recording, stop recording. Ending recording also cuts any
-        // in-progress TTS — the user is signalling "stop, listen to me".
+        // While recording, the mic is showing the Send (arrow-up) icon — a tap
+        // commits the recording for transcription + send, matching the icon.
         if currentState == .recording {
-            delegate?.stopSpeech()
-            stopRecording()
-            returnToNormalState()
+            recordingSendButtonTapped()
             return
         }
 
-        if isKeyboardVisible && textView.isFirstResponder {
-            // This tap is acting purely as a keyboard-dismiss button — it's
-            // the same physical button as the mic, just a different icon
-            // while the keyboard is up. Dismiss only; never touch audio here
-            // (otherwise lowering the keyboard would also kill TTS playback).
+        // Something staged to send → the mic is showing Send; send it.
+        let hasText = !(textView.text ?? "").isEmpty
+        if hasText || pendingAttachment != nil {
+            sendButtonTapped()
+            return
+        }
+
+        // Otherwise the mic is the record trigger. Lower the keyboard first so
+        // the waveform isn't hidden behind it, then start recording — cutting
+        // TTS so we don't capture the assistant talking over the user.
+        if textView.isFirstResponder {
             textView.resignFirstResponder()
-        } else {
-            // Start recording — cut TTS first so we don't capture the
-            // assistant talking over the user.
-            delegate?.stopSpeech()
-            requestMicrophonePermission { [weak self] granted in
-                DispatchQueue.main.async {
-                    if granted {
-                        self?.startRecording()
-                    } else {
-                        // Handle permission denied
-                        print("Microphone permission denied")
-                    }
+        }
+        delegate?.stopSpeech()
+        requestMicrophonePermission { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted {
+                    self?.startRecording()
+                } else {
+                    // Handle permission denied
+                    print("Microphone permission denied")
                 }
             }
         }
@@ -630,14 +615,11 @@ class MessageBox: UIView {
         containerView.isHidden = true
         recordingContainerView.isHidden = false
         waveformView.isHidden = false
-        recordingSendButton.isHidden = false
         transcribingLabel.isHidden = true
 
-        // Transform mic button into stop button
-        micButton.setImage(UIImage(systemName: "stop.fill", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 22))), for: .normal)
-        micButton.tintColor = .white
-        micButton.backgroundColor = UIColor.systemRed
-        micButton.layer.cornerRadius = 25
+        // Files button → red Stop, mic button → blue Send. Both stay visible,
+        // floating over the recording container with the waveform between them.
+        refreshInputButtons()
 
         VoiceLoopCoordinator.shared.setState(.recording)
         EarconPlayer.shared.play(.listenStart)
@@ -651,7 +633,6 @@ class MessageBox: UIView {
     private func switchToTranscribingState() {
         currentState = .transcribing
         waveformView.isHidden = true
-        recordingSendButton.isHidden = true
         // Re-assert the canonical text — the Deepgram partial handler may
         // have overwritten this with `listening…` or live partials during
         // the streaming recording phase.
@@ -676,7 +657,6 @@ class MessageBox: UIView {
         containerView.isHidden = false
         recordingContainerView.isHidden = true
         waveformView.isHidden = true
-        recordingSendButton.isHidden = true
         transcribingLabel.isHidden = true
 
         // Clean up long-press recording state
@@ -1097,6 +1077,10 @@ class MessageBox: UIView {
     @objc private func handleMicLongPress(_ gesture: UILongPressGestureRecognizer) {
         switch gesture.state {
         case .began:
+            // When there's text/attachment staged the mic is a Send button —
+            // a long-press shouldn't hijack it into recording.
+            guard (textView.text ?? "").isEmpty, pendingAttachment == nil else { return }
+
             if textView.isFirstResponder {
                 textView.resignFirstResponder()
             }
@@ -1208,19 +1192,70 @@ extension MessageBox: UITextViewDelegate {
 }
 
 extension MessageBox {
-    /// Shows or hides `sendButton` based on whether there's anything ready
-    /// to send (typed text OR a staged attachment). The attach button is now
-    /// a standalone button on the left and is always visible.
+    /// Kept for the existing call sites (textViewDidChange, pendingAttachment
+    /// didSet). Both in-field buttons are refreshed from a single source of
+    /// truth so text / attachment changes morph the mic into Send.
     fileprivate func refreshTrailingButton() {
+        refreshInputButtons()
+    }
+
+    /// Single source of truth for the two in-field buttons.
+    ///
+    /// Left (files) button: paperclip at rest, red Stop while recording.
+    /// Right (mic) button: mic at rest, a keyboard-dismiss affordance when the
+    /// keyboard is up over an empty field, and a blue Send whenever there's
+    /// text/attachment staged or a recording in flight.
+    fileprivate func refreshInputButtons() {
+        updateLeftButton()
+        updateRightButton()
+    }
+
+    /// True when the left (files) button is currently acting as a
+    /// keyboard-dismiss button — i.e. the keyboard is up over a field that
+    /// already has typed text. In that case the right button is Send, so the
+    /// dismiss affordance moves to the left. Used by both the appearance and
+    /// the tap handler so they can't disagree.
+    private var leftButtonIsKeyboardDismiss: Bool {
+        guard currentState != .recording else { return false }
+        return isKeyboardVisible && textView.isFirstResponder
+    }
+
+    private func updateLeftButton() {
+        if currentState == .recording {
+            attachButton.setImage(UIImage(systemName: "stop.fill", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 15))), for: .normal)
+            attachButton.tintColor = .white
+            attachButton.backgroundColor = .systemRed
+        } else if leftButtonIsKeyboardDismiss {
+            // Keyboard is up — turn the add button into a keyboard-dismiss
+            // button regardless of whether anything's been typed yet.
+            attachButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 18))), for: .normal)
+            attachButton.tintColor = .secondaryLabel
+            attachButton.backgroundColor = .clear
+        } else {
+            attachButton.setImage(UIImage(systemName: "plus.circle ", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 26, weight: .regular))), for: .normal)
+            attachButton.tintColor = .secondaryLabel
+            attachButton.backgroundColor = .clear
+        }
+    }
+
+    private func updateRightButton() {
         let hasText = (textView.text?.count ?? 0) > 0
         let hasAttachment = pendingAttachment != nil
-        let showSend = hasText || hasAttachment
+        let arrowUp = UIImage(systemName: "arrow.up", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 20, weight: .semibold)))
 
-        sendButton.isHidden = !showSend
-
-        sendButton.tintColor = showSend ? .white : .secondaryLabel
-        sendButton.backgroundColor = showSend ? .systemBlue : UIColor.tertiarySystemBackground
-        sendButton.isEnabled = showSend
+        if currentState == .recording || hasText || hasAttachment {
+            // Send.
+            micButton.setImage(arrowUp, for: .normal)
+            micButton.tintColor = .white
+            micButton.backgroundColor = .systemBlue
+        } else {
+            // Mic — solid circular fill matching the input field's color, so it
+            // reads as a filled button (like Send) even sitting on the page
+            // background rather than inside the field.
+            micButton.setImage(UIImage(systemName: "mic.fill", withConfiguration: UIImage.SymbolConfiguration(font: UIFont.systemFont(ofSize: 20))), for: .normal)
+            micButton.tintColor = .secondaryLabel
+            micButton.backgroundColor = .systemGray6
+        }
     }
 
     /// Shows/hides the chip + adjusts its image and label off the current
@@ -1597,6 +1632,23 @@ extension MessageBox {
 
 extension MessageBox: UIImagePickerControllerDelegate, UINavigationControllerDelegate {
     @objc fileprivate func attachButtonTapped() {
+        // While recording, the files button is showing the red Stop icon — a
+        // tap discards the in-progress recording (without transcribing it).
+        // Cutting any in-progress TTS matches "stop, I'm done" intent.
+        if currentState == .recording {
+            delegate?.stopSpeech()
+            stopRecording()
+            returnToNormalState()
+            return
+        }
+
+        // While typing, the clip acts as a keyboard-dismiss button (the right
+        // button is Send). Lower the keyboard instead of opening the picker.
+        if leftButtonIsKeyboardDismiss {
+            textView.resignFirstResponder()
+            return
+        }
+
         guard let presenter = self.parentViewController else { return }
 
         let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
