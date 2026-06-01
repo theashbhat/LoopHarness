@@ -36,6 +36,17 @@ final class AnthropicChat {
         return URLSession(configuration: config)
     }()
 
+    private lazy var streamingSessionDelegate: StreamingSessionDelegateRouter = {
+        StreamingSessionDelegateRouter()
+    }()
+    private lazy var streamingSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 180
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config, delegate: streamingSessionDelegate, delegateQueue: nil)
+    }()
+
     private let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     private let anthropicVersion = "2023-06-01"
     /// Opt-in to prompt caching. Sent as a space-separated list in the
@@ -59,14 +70,12 @@ final class AnthropicChat {
 
         let modelID = ModelSelectionStore.current.apiModelID ?? "claude-sonnet-4-6"
         let (system, wire) = Self.wirePayload(from: messages)
-        let requestStart = CFAbsoluteTimeGetCurrent()
 
         var body: [String: Any] = [
             "model": modelID,
             "max_tokens": maxTokens,
             "messages": wire,
         ]
-
         // --- Prompt caching: system prompt ---
         // Anthropic's prompt caching requires `system` to be an array of
         // content blocks (not a plain string) when cache_control is used.
@@ -100,10 +109,15 @@ final class AnthropicChat {
             body["tool_choice"] = ["type": "auto"]
         }
 
+        body["stream"] = true
+
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
             completion(nil, Self.error("Failed to encode the Anthropic request body."))
             return
         }
+
+        var metrics = InferenceMetrics(provider: "Anthropic", model: modelID, toolCount: (tools ?? []).count)
+        metrics.didBuildPayload(bytes: payload.count)
 
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
@@ -114,65 +128,25 @@ final class AnthropicChat {
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("AnthropicChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count) caching=enabled")
-        let task = session.dataTask(with: req) { data, response, error in
-            let latency = CFAbsoluteTimeGetCurrent() - requestStart
-            if let error = error {
-                print("AnthropicChat: FAILED after \(String(format: "%.2f", latency))s — \(error.localizedDescription)")
-                completion(nil, Self.error("Network error talking to Anthropic: \(error.localizedDescription)"))
-                return
-            }
-            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                let bodyStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                let detail = Self.errorDetail(from: bodyStr) ?? "HTTP \(http.statusCode)"
-                // Surface, don't swallow — wrong model id, bad key, or quota
-                // all land here and the user needs to see it.
-                completion(nil, Self.error("Anthropic API error: \(detail)"))
-                return
-            }
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let blocks = json["content"] as? [[String: Any]] else {
-                completion(nil, Self.error("Anthropic returned an unexpected payload."))
-                return
-            }
+        metrics.willSendRequest()
 
-            // Collect every `tool_use` block — Anthropic emits them in parallel
-            // for multi-step plans ("create note then move it then post link"),
-            // and dropping all but the first stalled the agent loop after one
-            // tool. Each call carries the provider id so the next user turn can
-            // pair `tool_result` blocks back via `tool_use_id`.
-            let calls: [FunctionCallStruct] = blocks.compactMap { block in
-                guard (block["type"] as? String) == "tool_use",
-                      let name = block["name"] as? String else { return nil }
-                let input = (block["input"] as? [String: Any]) ?? [:]
-                let id = block["id"] as? String
-                return FunctionCallStruct(name: name, arguments: input, callId: id)
+        let reader = AnthropicStreamReader(metrics: metrics) { result in
+            switch result {
+            case .success(let r):
+                let msg = MessageStruct(
+                    role: "assistant",
+                    content: r.content,
+                    model: ModelSelectionStore.current.stampedMessageModel,
+                    functions: r.toolCalls,
+                    tokenUsage: r.usage)
+                completion(msg, nil)
+            case .failure(let error):
+                completion(nil, Self.error("Anthropic streaming error: \(error.localizedDescription)"))
             }
-            let text = blocks
-                .filter { ($0["type"] as? String) == "text" }
-                .compactMap { $0["text"] as? String }
-                .joined(separator: "\n")
-            var usage: TokenUsage? = nil
-            if let u = json["usage"] as? [String: Any],
-               let input = u["input_tokens"] as? Int,
-               let output = u["output_tokens"] as? Int {
-                usage = TokenUsage(promptTokens: input,
-                                   completionTokens: output,
-                                   totalTokens: input + output)
-                // Log cache performance when the API reports it.
-                let cacheCreation = u["cache_creation_input_tokens"] as? Int ?? 0
-                let cacheRead = u["cache_read_input_tokens"] as? Int ?? 0
-                print("AnthropicChat: latency=\(String(format: "%.2f", latency))s input=\(input) output=\(output) cache_creation=\(cacheCreation) cache_read=\(cacheRead)")
-            }
-            let msg = MessageStruct(
-                role: "assistant",
-                content: text,
-                model: ModelSelectionStore.current.stampedMessageModel,
-                functions: calls,
-                tokenUsage: usage)
-            completion(msg, nil)
         }
+
+        let task = streamingSession.dataTask(with: req)
+        streamingSessionDelegate.register(task: task, reader: reader)
         task.resume()
     }
 

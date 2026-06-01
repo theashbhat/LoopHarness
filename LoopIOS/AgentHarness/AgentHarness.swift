@@ -350,15 +350,20 @@ final class AgentHarness {
         // Pick up any external edits the user made via the Files app since
         // the last call. Cheap (5 file stats + reads only when mtime changed).
         loadPersistedSelfDocs()
-        // Same for user-authored skills — if the user dropped a new skill
-        // folder into Workspace/Skills/ since the last turn, see it now.
-        DynamicSkillRegistry.shared.reload()
-        // And remote MCP servers — re-fetch tools/list off the network so
-        // catalog changes on the server side show up without a relaunch.
-        // `reload()` is fire-and-forget: the current turn always uses the
-        // cached catalog, and any updates land via `didReload` in time for
-        // the next turn, matching the dynamic registry's contract.
-        MCPRegistry.shared.reload()
+
+        // Debounced reload of dynamic skills and MCP servers. The registries
+        // use mtime checks internally, so a reload is cheap, but the MCP
+        // path fires network requests to every enabled server. Throttle both
+        // to avoid churn on rapid multi-turn sequences.
+        let now = Date()
+        if now.timeIntervalSince(lastDynamicSkillReload) >= reloadDebounceInterval {
+            DynamicSkillRegistry.shared.reload()
+            lastDynamicSkillReload = now
+        }
+        if now.timeIntervalSince(lastMCPReload) >= reloadDebounceInterval {
+            MCPRegistry.shared.reload()
+            lastMCPReload = now
+        }
 
         // Two reasons to take the offline (Apple Foundation) path:
         //   1. The device is offline — the cloud is unreachable, so no other
@@ -375,7 +380,14 @@ final class AgentHarness {
             return
         }
 
-        let toolsToSend = AgentHarness.uniqueToolSchemas(tools ?? toolSchemas)
+        let uniqueTools = AgentHarness.uniqueToolSchemas(tools ?? toolSchemas)
+
+        // Route tools: pick relevant skill groups based on the latest user
+        // message. Falls back to the full set when ambiguous.
+        let lastUserContent = messages.last(where: { $0.role == "user" })?.content ?? ""
+        let (toolsToSend, _) = ToolRouter.select(allTools: uniqueTools,
+                                                  userMessage: lastUserContent)
+
         let baseInstructions = messages.first(where: { $0.role == "system" })?.content ?? ""
         let composedSystem = buildSystemPrompt(base: baseInstructions)
         var rebuilt: [MessageStruct] = [MessageStruct(role: "system", content: composedSystem)]
@@ -541,6 +553,17 @@ final class AgentHarness {
     /// mtime cache so we only re-read context files that the user edited
     /// externally (or the agent rewrote on disk) since the last refresh.
     private var lastLoadedMtimes: [SelfDoc: Date] = [:]
+
+    /// Minimum interval between consecutive DynamicSkillRegistry /
+    /// MCPRegistry reload calls. Avoids churning the filesystem and
+    /// network on rapid-fire multi-turn sequences. External-edit
+    /// detection still works — the registries' own mtime guards mean
+    /// a no-op reload is ~5 file stats, but even that is wasted if the
+    /// last reload was < 10 s ago. The `didReload` callback still fires
+    /// for real changes at any time (e.g. user drops a skill mid-turn).
+    private let reloadDebounceInterval: TimeInterval = 10
+    private var lastDynamicSkillReload: Date = .distantPast
+    private var lastMCPReload: Date = .distantPast
 
     private func loadPersistedSelfDocs() {
         let fm = FileManager.default
