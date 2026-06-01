@@ -12,6 +12,10 @@ paths = [
   '''\.env\.example''',
   '''Secrets\.xcconfig\.example''',
   '''SECURITY\.md''',
+  # Setup guide: documents GitHub secret *names* (e.g. the env var
+  # IOS_DISTRIBUTION_CERTIFICATE_P12), not secret values. generic-api-key
+  # matches those high-entropy names in the "Store in GitHub secrets:" prose.
+  '''docs/TESTFLIGHT\.md''',
 ]
 
 regexes = [
