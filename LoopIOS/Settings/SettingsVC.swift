@@ -27,12 +27,14 @@ final class SettingsVC: UIViewController {
     }
 
     private let sections: [Section] = [
-        Section(header: nil, rows: [
-            Row(title: "Model", icon: "cpu") { settings in
-                settings.navigationController?.pushViewController(ModelPickerVC(), animated: true)
-            },
+        Section(header: "Core", rows: [
             Row(title: "Execution Backend", icon: "externaldrive.badge.icloud") { settings in
                 settings.navigationController?.pushViewController(ExecutionBackendVC(), animated: true)
+            }
+        ]),
+        Section(header: "Main", rows: [
+            Row(title: "Model", icon: "cpu") { settings in
+                settings.navigationController?.pushViewController(ModelPickerVC(), animated: true)
             },
             Row(title: "Integrations", icon: "puzzlepiece.extension.fill") { settings in
                 settings.navigationController?.pushViewController(IntegrationsVC(), animated: true)
@@ -48,12 +50,6 @@ final class SettingsVC: UIViewController {
             },
             Row(title: "Keys", icon: "key.fill") { settings in
                 settings.navigationController?.pushViewController(KeysVC(), animated: true)
-            },
-            Row(title: "SSH", icon: "terminal") { settings in
-                settings.navigationController?.pushViewController(SSHConnectionsVC(), animated: true)
-            },
-            Row(title: "Runners", icon: "server.rack") { settings in
-                settings.navigationController?.pushViewController(RunnersListVC(), animated: true)
             }
         ]),
         // Lives in its own section so it reads as a discrete debug/utility

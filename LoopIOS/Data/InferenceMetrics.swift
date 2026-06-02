@@ -49,6 +49,14 @@ struct InferenceMetrics {
         print("[\(provider)] TTFB: \(String(format: "%.0f", ttfb))ms")
     }
 
+    /// Time-to-first-token (first streamed chunk) in seconds, or `nil` if no
+    /// chunk has arrived yet. Surfaced to the UI for the per-message latency
+    /// readout shown next to the model name.
+    var ttft: TimeInterval? {
+        guard firstChunkTime > 0, requestStart > 0 else { return nil }
+        return firstChunkTime - requestStart
+    }
+
     /// Call when the response is fully received. Logs total duration and
     /// token usage when available.
     func didComplete(usage: TokenUsage? = nil, cachedTokens: Int? = nil) {

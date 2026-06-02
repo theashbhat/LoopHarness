@@ -16,6 +16,8 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
         let content: String
         let toolCalls: [FunctionCallStruct]
         let usage: TokenUsage?
+        /// Time-to-first-token in seconds, for the per-message latency readout.
+        let ttft: TimeInterval?
     }
 
     private let completion: (Swift.Result<Result, Error>) -> Void
@@ -189,6 +191,7 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
         completion(.success(Result(
             content: contentBuffer,
             toolCalls: calls,
-            usage: usage)))
+            usage: usage,
+            ttft: metrics.ttft)))
     }
 }

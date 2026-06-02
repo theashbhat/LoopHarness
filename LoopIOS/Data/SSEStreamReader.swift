@@ -30,6 +30,8 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
         let reasoningContent: String?
         let usage: TokenUsage?
         let cachedTokens: Int?
+        /// Time-to-first-token in seconds, for the per-message latency readout.
+        let ttft: TimeInterval?
     }
 
     private let completion: (Swift.Result<Result, Error>) -> Void
@@ -209,7 +211,8 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
             toolCalls: calls,
             reasoningContent: reasoningBuffer.isEmpty ? nil : reasoningBuffer,
             usage: usage,
-            cachedTokens: cachedTokens)
+            cachedTokens: cachedTokens,
+            ttft: metrics.ttft)
         completion(.success(result))
     }
 }

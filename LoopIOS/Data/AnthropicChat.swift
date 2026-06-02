@@ -139,7 +139,8 @@ final class AnthropicChat {
                     content: r.content,
                     model: ModelSelectionStore.current.stampedMessageModel,
                     functions: r.toolCalls,
-                    tokenUsage: r.usage)
+                    tokenUsage: r.usage,
+                    ttft: r.ttft)
                 completion(msg, nil)
             case .failure(let error):
                 completion(nil, Self.error("Anthropic streaming error: \(error.localizedDescription)"))

@@ -141,7 +141,8 @@ final class OpenAIChat {
                     model: ModelSelectionStore.current.stampedMessageModel,
                     functions: r.toolCalls,
                     reasoningContent: r.reasoningContent,
-                    tokenUsage: r.usage)
+                    tokenUsage: r.usage,
+                    ttft: r.ttft)
                 completion(msg, nil)
             case .failure(let error):
                 completion(nil, Self.error("OpenAI streaming error: \(error.localizedDescription)"))

@@ -290,6 +290,31 @@ final class ConversationFileStore: ConversationStore {
         }
     }
 
+    /// Replaces a message in place (matched by id), preserving its position,
+    /// then rewrites the file. No-op if the conversation or message is absent.
+    func updateMessage(_ message: SimpleMessage, inConversation conversationId: String) {
+        cacheLock.lock()
+        guard var conv = cache[conversationId],
+              let idx = conv.messages.firstIndex(where: { $0.id == message.id }) else {
+            cacheLock.unlock(); return
+        }
+        conv.messages[idx] = message
+        conv.updatedAt = Date()
+        cache[conversationId] = conv
+        pendingWrites.insert(conversationId)
+        recomputeOrderedIdsLocked()
+        cacheLock.unlock()
+        let snapshot = conv
+        postChangeNotification()
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.rewriteFile(for: snapshot)
+            self.cacheLock.lock()
+            self.pendingWrites.remove(conversationId)
+            self.cacheLock.unlock()
+        }
+    }
+
     /// Rewrites the whole file without the given message. Rare op (Mac
     /// escape-cancel).
     func removeMessage(id messageId: String, fromConversation conversationId: String) {
@@ -802,7 +827,7 @@ private struct MessageLineEnvelope: Encodable {
     let message: SimpleMessage
 
     private enum CodingKeys: String, CodingKey {
-        case _type, id, role, content, name, functionName, functionArguments, actions, fileAttachment, createdAt
+        case _type, id, role, content, name, functionName, functionArguments, actions, fileAttachment, imageAttachment, createdAt
     }
 
     func encode(to encoder: Encoder) throws {
@@ -816,6 +841,7 @@ private struct MessageLineEnvelope: Encodable {
         try c.encodeIfPresent(message.functionArguments, forKey: .functionArguments)
         try c.encodeIfPresent(message.actions, forKey: .actions)
         try c.encodeIfPresent(message.fileAttachment, forKey: .fileAttachment)
+        try c.encodeIfPresent(message.imageAttachment, forKey: .imageAttachment)
         try c.encode(message.createdAt, forKey: .createdAt)
     }
 }

@@ -38,7 +38,15 @@ final class ImageGenerationService {
     /// Active jobs keyed by attachment id. Read on main; mutated through
     /// `mutate(_:)` so we never race the URLSession completion handler.
     private var jobs: [String: URLSessionDataTask] = [:]
+    /// API `size` string used for each attachment id, remembered so `retry`
+    /// regenerates at the same aspect the user originally asked for. Guarded
+    /// by `jobsQueue` alongside `jobs`.
+    private var sizes: [String: String] = [:]
     private let jobsQueue = DispatchQueue(label: "loop.image-gen.jobs")
+
+    /// API `size` sent when a caller doesn't specify one. Matches the prior
+    /// always-square behavior.
+    static let defaultSize = "1024x1024"
 
     /// Custom session — 5min per request, 10min total resource budget,
     /// waits for connectivity instead of failing immediately so a flaky
@@ -62,6 +70,7 @@ final class ImageGenerationService {
     /// even starts. The host's didStart/didFinish callbacks fire on main.
     @discardableResult
     func submit(prompt: String,
+                size: String = ImageGenerationService.defaultSize,
                 attachmentId: String? = nil,
                 conversationId: String? = nil) -> ImageAttachment {
         let id = attachmentId ?? UUID().uuidString
@@ -69,6 +78,7 @@ final class ImageGenerationService {
                                          prompt: prompt,
                                          status: .generating,
                                          conversationId: conversationId)
+        jobsQueue.sync { sizes[id] = size }
 
         // Tell the UI a placeholder should appear right now — even before
         // we've checked the API key. Failures still surface through
@@ -78,7 +88,7 @@ final class ImageGenerationService {
             self?.host?.imageSkillDidStartGenerating(attachment)
         }
 
-        startNetworkRequest(attachment: attachment)
+        startNetworkRequest(attachment: attachment, size: size)
         return attachment
     }
 
@@ -94,16 +104,20 @@ final class ImageGenerationService {
     /// row in the chat updates in place (same id → existing message gets
     /// mutated rather than a new one inserted).
     @discardableResult
-    func retry(attachmentId: String, prompt: String, conversationId: String? = nil) -> ImageAttachment {
+    func retry(attachmentId: String, prompt: String, size: String? = nil, conversationId: String? = nil) -> ImageAttachment {
+        // Reuse the size the original generation used unless the caller
+        // overrides it, so "regenerate" keeps the same aspect.
+        let resolvedSize = size ?? jobsQueue.sync { sizes[attachmentId] } ?? ImageGenerationService.defaultSize
         cancel(attachmentId: attachmentId)
         return submit(prompt: prompt,
+                      size: resolvedSize,
                       attachmentId: attachmentId,
                       conversationId: conversationId)
     }
 
     // MARK: - Network
 
-    private func startNetworkRequest(attachment: ImageAttachment) {
+    private func startNetworkRequest(attachment: ImageAttachment, size: String) {
         guard let apiKey = ImageGenerationService.openAIAPIKey else {
             deliverFailure(message: "No OpenAI API key is configured. Add one in Settings → Keys → OpenAI and the app will store it securely in the iOS Keychain on-device.",
                            attachment: attachment)
@@ -124,7 +138,7 @@ final class ImageGenerationService {
         let body: [String: Any] = [
             "model": "gpt-image-2",
             "prompt": attachment.prompt,
-            "size": "1024x1024",
+            "size": size,
             "n": 1
         ]
         guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {

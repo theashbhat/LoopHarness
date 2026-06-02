@@ -292,6 +292,21 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     /// `messages` array, keeping the on-screen table clean.
     private var activeRequestConversationId: String?
 
+    // MARK: Remote (VM) turn polling
+    //
+    // When the active execution backend is an OpenClaw VM, the agent runs on the
+    // VM and a daemon there writes the assistant turn into the session file. We
+    // poll that single file (not the whole directory) until the reply lands.
+    /// The conversation currently being polled for a VM reply, or nil when no
+    /// remote turn is in flight.
+    private var remotePollConversationId: String?
+    /// Message ids already on screen when the poll started — anything new and
+    /// non-user that appears in the session is a freshly-written VM turn.
+    private var remotePollKnownIds: Set<String> = []
+    /// When the current poll began, for fast→slow backoff and the hard timeout.
+    private var remotePollStartedAt: Date?
+    private var remotePollTimer: Timer?
+
     lazy var messages: [MessageStruct] = [
         MessageStruct(role: "system", content: base_system_prompt),
     ]
@@ -479,6 +494,17 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             object: nil
         )
 
+        // Joining / leaving / switching an execution backend swaps which
+        // conversations are visible (local vs the active VM's sessions), so
+        // re-anchor the open chat onto the now-active backend's most recent
+        // conversation and drop any in-flight VM poll for the old backend.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleExecutionBackendChanged),
+            name: ExecutionBackendStore.didChangeNotification,
+            object: nil
+        )
+
         // Cover writers that go through iCloudKVSDefaults directly (e.g. the
         // OnboardingCoordinator's voice-step writes to `audioMuted` and
         // `ttsProvider`) — without this, picking a voice during onboarding
@@ -573,10 +599,29 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     
     deinit {
         NotificationCenter.default.removeObserver(self)
+        remotePollTimer?.invalidate()
     }
     
     // MARK: - Conversation Management
     
+    /// The active execution backend changed (joined/left/switched a VM). The
+    /// visible conversation list is now the active backend's, so re-anchor onto
+    /// its most recent conversation. Cancel any in-flight VM poll first — its
+    /// conversation belongs to the backend we're leaving.
+    @objc private func handleExecutionBackendChanged() {
+        cancelRemotePoll()
+        activeRequestConversationId = nil
+        ai_state = .None
+        if let conversation = conversationManager.loadLastConversation() {
+            currentConversationEntity = conversation
+            loadMessagesFromConversation(conversation)
+        } else {
+            currentConversationEntity = nil
+            conversationManager.clearCurrentConversation()
+            loadDefaultMessage()
+        }
+    }
+
     private func loadLastConversation() {
         print("🚀 Loading last conversation on app start")
         
@@ -591,7 +636,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         }
     }
     
-    private func loadMessagesFromConversation(_ conversation: SimpleConversation) {
+    private func loadMessagesFromConversation(_ conversation: SimpleConversation, refreshIfRemote: Bool = true) {
         print("🔄 Loading conversation: \(conversation.title)")
         print("🔄 Total messages in conversation: \(conversation.messages.count)")
         
@@ -614,6 +659,20 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         DispatchQueue.main.async {
             self.tableView.reloadData()
             self.scrollToLastMessage()
+        }
+
+        // For a VM-backed conversation, the assistant turn is written remotely
+        // by the daemon, so the local cache can lag what's on the VM (e.g. a
+        // reply that landed while the user was elsewhere). Pull just this
+        // session once on open and re-render if it changed.
+        if refreshIfRemote && conversation.backendKind == .remote {
+            let convId = conversation.id
+            conversationManager.refreshRemoteConversation(id: convId) { [weak self] _ in
+                guard let self = self,
+                      self.currentConversationEntity?.id == convId,
+                      let fresh = self.conversationManager.getConversation(by: convId) else { return }
+                self.loadMessagesFromConversation(fresh, refreshIfRemote: false)
+            }
         }
     }
 
@@ -638,6 +697,9 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // Reset the in-flight request scope so responses from a previous
         // conversation's request don't bleed into this one's in-memory table.
         activeRequestConversationId = nil
+        // A VM poll for the chat we're leaving must not keep ticking and
+        // appending its reply onto this conversation's table.
+        cancelRemotePoll()
         ai_state = .None
         // Stop the avatar's "thinking" animation — an in-flight request from
         // the chat we just left must not keep the avatar spinning here.
@@ -670,6 +732,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         currentConversationEntity = newConversation
         conversationManager.currentConversation = newConversation
         activeRequestConversationId = nil
+        cancelRemotePoll()
         // Clear the "Thinking…" shimmer so an in-flight request from the chat
         // we just left doesn't leak its state onto the fresh chat. Mirrors
         // `loadConversation`; the previous request still completes, but its
@@ -1079,6 +1142,19 @@ extension MessagingVC: MessageBoxDelegate {
         self.activeRequestConversationId = requestConversationId
         ActiveRequestTracker.shared.markActive(requestConversationId)
 
+        // Remote execution backend: when the conversation lives on a VM the
+        // agent runs there, not on-device. Adding the user message through the
+        // router reached that conversation's remote store, which ran the OpenClaw
+        // agent on the VM over SSH (`openclaw agent --session-id …`, detached).
+        // The agent writes its reply into the session transcript; we poll that
+        // transcript for the reply instead of running local inference (and skip
+        // on-device-only steps like context compaction).
+        if conversation.backendKind == .remote {
+            self.beginStreamingTurn()
+            self.startRemotePoll(conversationId: requestConversationId)
+            return
+        }
+
         // Opportunistic context compaction: check thresholds and spawn a
         // background sub-agent if the context is large enough. The trigger
         // level is captured so we can append a brief notice to the
@@ -1278,6 +1354,132 @@ extension MessagingVC: MessageBoxDelegate {
         if nearBottom {
             tableView.scrollToRow(at: ip, at: .bottom, animated: false)
         }
+    }
+
+    // MARK: - Remote (VM) turn polling
+
+    /// Begin polling a remote (OpenClaw VM) session for the assistant reply the
+    /// VM-side daemon will write. No local inference runs on this path. The
+    /// "Thinking…" shimmer (set by the caller) stays up until the first new line
+    /// lands; new assistant/tool lines are rendered as they arrive.
+    private func startRemotePoll(conversationId: String) {
+        cancelRemotePoll()
+        guard let conv = conversationManager.getConversation(by: conversationId) else { return }
+        remotePollConversationId = conversationId
+        remotePollKnownIds = Set(conversationManager.getMessages(for: conv).map { $0.id })
+        remotePollStartedAt = Date()
+        scheduleRemotePollTick()
+    }
+
+    /// Stop the in-flight remote poll (called on terminal reply, timeout, and
+    /// whenever the viewed conversation changes out from under it).
+    private func cancelRemotePoll() {
+        remotePollTimer?.invalidate()
+        remotePollTimer = nil
+        remotePollConversationId = nil
+        remotePollStartedAt = nil
+        remotePollKnownIds = []
+    }
+
+    /// Re-arm the poll timer. Fast (1.5s) for the first 15s when the reply
+    /// usually starts, then backs off to 4s up to the hard timeout.
+    private func scheduleRemotePollTick() {
+        guard let startedAt = remotePollStartedAt else { return }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let delay: TimeInterval = elapsed < 15 ? 1.5 : 4.0
+        remotePollTimer?.invalidate()
+        remotePollTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.remotePollTick()
+        }
+    }
+
+    private func remotePollTick() {
+        guard let convId = remotePollConversationId,
+              let startedAt = remotePollStartedAt else { return }
+        // Hard cap: the agent may still be working (OpenClaw turns can be long —
+        // the Gateway's default timeout is 600s), so don't persist a fake turn —
+        // just surface a UI bubble and stop polling. A later full refresh (or
+        // reopening the chat) will pick up the real reply if it lands.
+        if Date().timeIntervalSince(startedAt) > 240 {
+            finishRemotePollWithTimeout(conversationId: convId)
+            return
+        }
+        conversationManager.refreshRemoteConversation(id: convId) { [weak self] _ in
+            guard let self = self else { return }
+            // The poll may have been cancelled or replaced while the SSH fetch
+            // was in flight (user switched chats / sent again / changed backend).
+            guard self.remotePollConversationId == convId else { return }
+            let terminal = self.ingestNewRemoteMessages(conversationId: convId)
+            if terminal {
+                self.cancelRemotePoll()
+            } else {
+                self.scheduleRemotePollTick()
+            }
+        }
+    }
+
+    /// Diff the freshly-synced session against `remotePollKnownIds`, render any
+    /// new assistant/tool turns (if still viewing), and report whether the turn
+    /// is terminal — at least one new assistant message has arrived and it's the
+    /// last line in the session (tool/function lines keep the poll running).
+    private func ingestNewRemoteMessages(conversationId: String) -> Bool {
+        guard let conv = conversationManager.getConversation(by: conversationId) else { return false }
+        let stored = conversationManager.getMessages(for: conv)
+        let isViewing = currentConversationEntity?.id == conversationId
+        var sawNewAssistant = false
+        var appended = false
+        for msg in stored where !remotePollKnownIds.contains(msg.id) {
+            remotePollKnownIds.insert(msg.id)
+            if msg.role == "assistant" { sawNewAssistant = true }
+            // User lines are already on screen (appended at send time); render
+            // assistant + tool/function lines as they land.
+            if isViewing, msg.role != "user" {
+                self.messages.append(conversationManager.messageStruct(from: msg))
+                appended = true
+            }
+        }
+
+        let terminal = sawNewAssistant && stored.last?.role == "assistant"
+
+        if isViewing && (appended || terminal) {
+            if terminal {
+                self.ai_state = .None
+                VoiceLoopCoordinator.shared.setState(.idle)
+            }
+            self.streamingPartial = ""
+            self.tableView.reloadData()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.scrollToLastMessage()
+            }
+        } else if !isViewing && sawNewAssistant {
+            // Reply arrived for a chat the user navigated away from.
+            markConversationUnread(conversationId)
+        }
+
+        if terminal {
+            ActiveRequestTracker.shared.markIdle(conversationId)
+        }
+        return terminal
+    }
+
+    private func finishRemotePollWithTimeout(conversationId: String) {
+        cancelRemotePoll()
+        ActiveRequestTracker.shared.markIdle(conversationId)
+        let isViewing = currentConversationEntity?.id == conversationId
+        if isViewing {
+            self.ai_state = .None
+            self.streamingPartial = ""
+            let notice = MessageStruct(role: "assistant",
+                content: "The agent hasn't replied yet. It may still be working on the VM — reopen this chat in a moment to check.")
+            self.messages.append(notice)
+            self.messageIdToAnimate = notice.id
+            self.tableView.reloadData()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.scrollToLastMessage()
+            }
+            VoiceLoopCoordinator.shared.setState(.idle)
+        }
+        EarconPlayer.shared.play(.error)
     }
 
     func processMessage(message: MessageStruct, requestConversationId: String? = nil) {
@@ -2959,6 +3161,7 @@ extension MessagingVC: ImageSkillHost {
         // brand-new generation gets its own bubble.
         if let idx = self.messages.firstIndex(where: { $0.imageAttachment?.id == attachment.id }) {
             self.messages[idx].imageAttachment = attachment
+            self.persistImageMessage(at: idx, conversationId: attachment.conversationId)
             DispatchQueue.main.async {
                 if let visibleIdx = self.visible_messages.firstIndex(where: { $0.imageAttachment?.id == attachment.id }) {
                     let path = IndexPath(row: visibleIdx, section: 0)
@@ -2995,6 +3198,10 @@ extension MessagingVC: ImageSkillHost {
             return
         }
         self.messages[idx].imageAttachment = attachment
+        // Persist the terminal state so the image reloads correctly after a
+        // relaunch — `.ready` renders from its saved PNG, `.failed` keeps its
+        // retry affordance — rather than staying `.generating` on disk.
+        self.persistImageMessage(at: idx, conversationId: attachment.conversationId)
         DispatchQueue.main.async {
             // Reload just the row so the typing animation on neighboring
             // messages doesn't restart.
@@ -3005,6 +3212,17 @@ extension MessagingVC: ImageSkillHost {
                 self.tableView.reloadData()
             }
         }
+    }
+
+    /// Re-persist the image bubble at `idx` so its current attachment state is
+    /// durable. Routes to the conversation the generation was pinned to (falls
+    /// back to the active one). Safe to call for any image message — it's a
+    /// no-op in the store if the message isn't persisted yet.
+    private func persistImageMessage(at idx: Int, conversationId: String?) {
+        guard self.messages.indices.contains(idx) else { return }
+        let convId = conversationId ?? self.currentConversationEntity?.id
+        guard let convId, let conv = self.conversationManager.getConversation(by: convId) else { return }
+        self.conversationManager.updateMessage(self.messages[idx], in: conv)
     }
 
     /// Same sweep for stuck PDFs — the WKWebView job that owned them is
@@ -3042,6 +3260,11 @@ extension MessagingVC: ImageSkillHost {
                 attachment.failureReason = "Generation was interrupted (app restart). Tap retry to try again."
                 self.messages[idx].imageAttachment = attachment
                 changed = true
+                // Persist the reconciled state so it stays failed on disk and
+                // across conversation switches — not just in this view's
+                // in-memory copy. (At cold launch any live job is already gone,
+                // so flipping the persisted copy is always safe here.)
+                self.persistImageMessage(at: idx, conversationId: attachment.conversationId)
             }
         }
         if changed {

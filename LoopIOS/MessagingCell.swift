@@ -874,6 +874,10 @@ class MessagingCell: UITableViewCell {
     /// usage data and a known context window size are both available.
     private func modelText(for data: MessageStruct) -> String {
         var text = data.model
+        // Time-to-first-token, right after the model name: "GPT-5.5 2.6s".
+        if let ttft = data.ttft {
+            text += String(format: " %.2fs", ttft)
+        }
         if let usage = data.tokenUsage,
            let window = ModelSelection.contextWindowSize(forStamp: data.model),
            let pct = usage.contextPercent(windowSize: window) {

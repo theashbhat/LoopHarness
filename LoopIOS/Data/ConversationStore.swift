@@ -12,28 +12,32 @@
 //      NDJSON-per-conversation format to a remote SSH-accessible workspace.
 //
 //  `ConversationStore` is the common surface both expose. `SimpleConversation-
-//  Manager` owns a `ConversationStoreRouter` that fans reads across both stores
-//  (so old local conversations stay visible) and routes writes to whichever
-//  store owns a given conversation id. New conversations are created in the
-//  *active* backend — local unless the user has selected and validated OpenClaw.
+//  Manager` owns a `ConversationStoreRouter`. The conversation *list* reflects
+//  only the active backend (joining an OpenClaw VM replaces the local list with
+//  the VM's sessions; selecting Local restores the on-device list), while
+//  id-targeted reads/writes still route to whichever store owns a given
+//  conversation id so an in-flight conversation on a now-hidden backend is never
+//  corrupted. New conversations are created in the *active* backend — local
+//  unless the user has selected and validated OpenClaw.
 //
 //  Pure Foundation so it compiles for the iOS, macOS, and visionOS targets.
 //
 
 import Foundation
 
-/// The execution backend a conversation lives on. Persisted as
-/// `SimpleConversation.backend` (a raw string) so older entries that predate
-/// the field decode cleanly as `.local`.
+/// Coarse category of the backend a conversation lives on, used for display
+/// (the sidebar "VM" badge). The concrete backend is identified by id in
+/// `SimpleConversation.backend`; this enum just distinguishes local from any
+/// remote backend. A nil/`"local"` marker is `.local`; anything else `.remote`.
 enum ConversationBackend: String {
     case local
-    case openclaw
+    case remote
 
     /// User-facing label for badges and settings copy.
     var displayName: String {
         switch self {
-        case .local:    return "Local"
-        case .openclaw: return "OpenClaw VM"
+        case .local:  return "Local"
+        case .remote: return "Remote VM"
         }
     }
 }
@@ -64,56 +68,58 @@ protocol ConversationStore: AnyObject {
     func saveConversation(_ conversation: SimpleConversation)
     func deleteConversation(id: String)
     func addMessage(_ message: SimpleMessage, toConversation id: String)
+    /// Replace an existing message (matched by id) in place, preserving order.
+    /// Used when a message's content/attachment changes after first write —
+    /// e.g. an image flips from generating to ready. No-op if not present.
+    func updateMessage(_ message: SimpleMessage, inConversation conversationId: String)
     func removeMessage(id messageId: String, fromConversation conversationId: String)
 }
 
 // MARK: - Router
 
-/// Fans conversation operations across the local and (optional) OpenClaw
-/// stores. Ownership of a given id is decided by which store already knows it
-/// (local first), so existing local conversations keep behaving exactly as
-/// before even after OpenClaw is enabled. New conversations are created in the
-/// active backend, as reported by `isOpenClawActive`.
+/// Fans conversation operations across the local store and any number of remote
+/// backend stores (keyed by backend id). Ownership of a given id is decided by
+/// which store already knows it (local first), so existing conversations keep
+/// behaving exactly as before even as backends are added or removed. New
+/// conversations are created in the active backend, as reported by
+/// `activeRemoteID` (nil ⇒ local).
 final class ConversationStoreRouter {
 
     let local: ConversationStore
 
-    /// Present only when an OpenClaw store has been wired up. The router
-    /// tolerates `nil` (the default, OpenClaw-disabled state) by behaving
-    /// exactly like the local store alone.
-    private(set) var openClaw: ConversationStore?
+    /// Remote stores keyed by backend id. Empty in the default, local-only
+    /// state, in which the router behaves exactly like the local store alone.
+    private(set) var remotes: [String: ConversationStore]
 
-    /// Returns true when OpenClaw is the selected, configured, and validated
-    /// backend — i.e. new conversations should be created remotely. Evaluated
-    /// fresh on every create so toggling the setting takes effect immediately.
-    private let isOpenClawActive: () -> Bool
+    /// The active remote backend id, or nil when local is active. Evaluated
+    /// fresh on every create so changing the selection takes effect immediately.
+    private let activeRemoteID: () -> String?
 
     init(local: ConversationStore,
-         openClaw: ConversationStore?,
-         isOpenClawActive: @escaping () -> Bool) {
+         remotes: [String: ConversationStore] = [:],
+         activeRemoteID: @escaping () -> String?) {
         self.local = local
-        self.openClaw = openClaw
-        self.isOpenClawActive = isOpenClawActive
+        self.remotes = remotes
+        self.activeRemoteID = activeRemoteID
     }
 
-    /// Attach (or detach) the OpenClaw store at runtime — used when the user
-    /// configures OpenClaw without relaunching.
-    func setOpenClawStore(_ store: ConversationStore?) {
-        openClaw = store
+    /// Replace the set of remote stores at runtime — used when the user adds,
+    /// edits, or removes backends without relaunching.
+    func setRemotes(_ remotes: [String: ConversationStore]) {
+        self.remotes = remotes
     }
 
-    /// All stores, local first. Local-first ordering means an id present in
-    /// both (a vanishingly unlikely UUID collision) resolves to local.
+    /// All stores, local first. Local-first ordering means an id present in more
+    /// than one (a vanishingly unlikely UUID collision) resolves to local.
     private var stores: [ConversationStore] {
-        if let openClaw = openClaw { return [local, openClaw] }
-        return [local]
+        [local] + Array(remotes.values)
     }
 
     /// Where new conversations should be created. Falls back to local whenever
-    /// OpenClaw isn't active, which is the graceful-degradation path when SSH
-    /// is unconfigured or validation hasn't passed.
+    /// no remote backend is active — the graceful-degradation path when the
+    /// selected remote is unconfigured, unvalidated, or simply Local.
     var activeStore: ConversationStore {
-        if isOpenClawActive(), let openClaw = openClaw { return openClaw }
+        if let id = activeRemoteID(), let store = remotes[id] { return store }
         return local
     }
 
@@ -122,24 +128,23 @@ final class ConversationStoreRouter {
     /// so the first message lands in the same backend as the conversation.
     func store(forConversationId id: String) -> ConversationStore {
         if local.conversation(id: id) != nil { return local }
-        if let openClaw = openClaw, openClaw.conversation(id: id) != nil { return openClaw }
+        for store in remotes.values where store.conversation(id: id) != nil { return store }
         return activeStore
     }
 
-    // MARK: Reads (aggregated)
+    // MARK: Reads
 
+    /// The conversation *list* shows only the active backend — joining an
+    /// OpenClaw VM replaces the local list with the VM's sessions, and selecting
+    /// Local restores the on-device list. (Targeted reads/writes below still
+    /// resolve by ownership so an in-flight conversation on a now-hidden backend
+    /// is never corrupted.)
     func allConversations() -> [SimpleConversation] {
-        var seen = Set<String>()
-        var merged: [SimpleConversation] = []
-        for store in stores {
-            for conv in store.allConversations() where !seen.contains(conv.id) {
-                seen.insert(conv.id)
-                merged.append(conv)
-            }
-        }
-        return merged.sorted { $0.updatedAt > $1.updatedAt }
+        activeStore.allConversations()
     }
 
+    /// Resolve a specific id across every store (not just the active one) so a
+    /// conversation that is still open while its backend is hidden keeps loading.
     func conversation(id: String) -> SimpleConversation? {
         for store in stores {
             if let conv = store.conversation(id: id) { return conv }
@@ -147,18 +152,21 @@ final class ConversationStoreRouter {
         return nil
     }
 
+    /// Used by launch / `loadLastConversation`, so it must follow the active
+    /// backend — opening onto the active backend's most recent chat.
     func mostRecentlyUpdatedConversation() -> SimpleConversation? {
-        stores
-            .compactMap { $0.mostRecentlyUpdatedConversation() }
-            .max { $0.updatedAt < $1.updatedAt }
+        activeStore.mostRecentlyUpdatedConversation()
     }
 
     func messages(forConversation id: String) -> [SimpleMessage] {
         store(forConversationId: id).messages(forConversation: id)
     }
 
+    /// Only the visible (active) backend drives the sidebar spinner; a hidden
+    /// backend syncing in the background shouldn't show a spinner the user can't
+    /// relate to any visible content.
     var isSyncing: Bool {
-        stores.contains { $0.isSyncing }
+        activeStore.isSyncing
     }
 
     // MARK: Writes (routed by ownership)
@@ -177,6 +185,10 @@ final class ConversationStoreRouter {
 
     func addMessage(_ message: SimpleMessage, toConversation id: String) {
         store(forConversationId: id).addMessage(message, toConversation: id)
+    }
+
+    func updateMessage(_ message: SimpleMessage, inConversation conversationId: String) {
+        store(forConversationId: conversationId).updateMessage(message, inConversation: conversationId)
     }
 
     func removeMessage(id messageId: String, fromConversation conversationId: String) {

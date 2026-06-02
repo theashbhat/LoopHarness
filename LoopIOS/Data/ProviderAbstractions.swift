@@ -44,7 +44,14 @@ extension ExecutionEnvironment {
 
 /// Read/inspect/write of workspace files for a backend. The OpenClaw VM will
 /// back this with SFTP/SSH; the local environment with the on-device workspace.
-/// Placeholder — not yet implemented.
+///
+/// NOTE: The OpenClaw VM file surface is implemented by `OpenClawFileStore`, but
+/// it intentionally does NOT conform to this protocol. Its `list` returns rich
+/// `RemoteFileEntry` values (name + type) that the file-tree UI needs, whereas
+/// this protocol's `list` returns `[String]`; adding a second `[String]`-typed
+/// `list` overload would make `OpenClawFileStore`'s own call sites ambiguous.
+/// The Files tab selects the store via `ExecutionBackendStore.activeRemoteBackend`
+/// rather than through this seam, so the protocol stays a forward-looking sketch.
 protocol FileStore: AnyObject {
     func list(_ path: String) async throws -> [String]
     func read(_ path: String) async throws -> Data
@@ -53,6 +60,11 @@ protocol FileStore: AnyObject {
 
 /// The set of skills/tools a backend exposes to the agent. Placeholder for a
 /// future where a remote backend can advertise its own toolset.
+///
+/// NOTE: `OpenClawSkillStore` implements the remote skill surface but doesn't
+/// conform here — listing skills is an async SSH round trip, while this
+/// protocol's `availableSkillNames()` is synchronous. The Skills tab uses
+/// `OpenClawSkillStore` directly (chosen by active backend) rather than this seam.
 protocol SkillRegistry: AnyObject {
     func availableSkillNames() -> [String]
 }
