@@ -31,6 +31,9 @@ final class SettingsVC: UIViewController {
             Row(title: "Model", icon: "cpu") { settings in
                 settings.navigationController?.pushViewController(ModelPickerVC(), animated: true)
             },
+            Row(title: "Execution Backend", icon: "externaldrive.badge.icloud") { settings in
+                settings.navigationController?.pushViewController(ExecutionBackendVC(), animated: true)
+            },
             Row(title: "Integrations", icon: "puzzlepiece.extension.fill") { settings in
                 settings.navigationController?.pushViewController(IntegrationsVC(), animated: true)
             },

@@ -15,13 +15,30 @@ struct SimpleConversation: Codable {
     var messages: [SimpleMessage]
     let createdAt: Date
     var updatedAt: Date
+    /// Which execution backend owns this conversation — `"local"` (iCloud /
+    /// on-device file store) or `"openclaw"` (remote OpenClaw VM). Optional for
+    /// backward compatibility: conversations written before this field existed
+    /// decode as `nil` and are treated as local. See `backendKind`.
+    var backend: String?
 
-    init(id: String = UUID().uuidString, title: String, messages: [SimpleMessage] = [], createdAt: Date = Date(), updatedAt: Date = Date()) {
+    init(id: String = UUID().uuidString,
+         title: String,
+         messages: [SimpleMessage] = [],
+         createdAt: Date = Date(),
+         updatedAt: Date = Date(),
+         backend: String? = nil) {
         self.id = id
         self.title = title
         self.messages = messages
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.backend = backend
+    }
+
+    /// Typed view of `backend`. A nil/unknown marker maps to `.local` so
+    /// pre-existing conversations behave exactly as before.
+    var backendKind: ConversationBackend {
+        ConversationBackend(rawValue: backend ?? "") ?? .local
     }
 }
 
@@ -91,7 +108,15 @@ struct SimpleMessage: Codable {
 class SimpleConversationManager {
     static let shared = SimpleConversationManager()
 
-    private var store: ConversationFileStore { ConversationFileStore.shared }
+    /// Fans reads across the local + OpenClaw stores and routes writes to
+    /// whichever backend owns a conversation. New conversations are created in
+    /// the active backend (local unless OpenClaw is selected, configured, and
+    /// validated). Existing local conversations stay visible and local.
+    let router = ConversationStoreRouter(
+        local: ConversationFileStore.shared,
+        openClaw: OpenClawConversationStore.shared,
+        isOpenClawActive: { ExecutionBackendStore.shared.isOpenClawActive }
+    )
 
     private init() {}
 
@@ -120,26 +145,26 @@ class SimpleConversationManager {
     // MARK: - Conversation Operations
 
     func getAllConversations() -> [SimpleConversation] {
-        return store.allConversations()
+        return router.allConversations()
     }
 
     func getConversation(by id: String) -> SimpleConversation? {
-        return store.conversation(id: id)
+        return router.conversation(id: id)
     }
 
     func createConversation(title: String = "New Conversation") -> SimpleConversation {
-        return store.createConversation(title: title)
+        return router.createConversation(title: title)
     }
 
     func saveConversation(_ conversation: SimpleConversation) {
-        store.saveConversation(conversation)
+        router.saveConversation(conversation)
         if currentConversation?.id == conversation.id {
             _currentConversation = conversation
         }
     }
 
     func deleteConversation(_ conversation: SimpleConversation) {
-        store.deleteConversation(id: conversation.id)
+        router.deleteConversation(id: conversation.id)
         if currentConversation?.id == conversation.id {
             currentConversation = nil
         }
@@ -209,11 +234,11 @@ class SimpleConversationManager {
             isCompactionSummary: messageStruct.isCompactionSummary ? true : nil
         )
 
-        store.addMessage(simpleMessage, toConversation: conversation.id)
+        router.addMessage(simpleMessage, toConversation: conversation.id)
 
         // Refresh local snapshot of the current conversation so callers see the
         // appended message immediately without re-fetching.
-        let refreshed = store.conversation(id: conversation.id)
+        let refreshed = router.conversation(id: conversation.id)
         if currentConversation?.id == conversation.id, let fresh = refreshed {
             _currentConversation = fresh
         }
@@ -237,16 +262,16 @@ class SimpleConversationManager {
     }
 
     func getMessages(for conversation: SimpleConversation) -> [SimpleMessage] {
-        return store.messages(forConversation: conversation.id)
+        return router.messages(forConversation: conversation.id)
     }
 
     /// Remove a single message by id from a conversation. Used by Mac escape
     /// cancellation; mirrors `addMessage` in keeping the in-memory snapshot of
     /// `currentConversation` consistent with the store.
     func removeMessage(id messageId: String, from conversation: SimpleConversation) {
-        store.removeMessage(id: messageId, fromConversation: conversation.id)
+        router.removeMessage(id: messageId, fromConversation: conversation.id)
         if currentConversation?.id == conversation.id,
-           let refreshed = store.conversation(id: conversation.id) {
+           let refreshed = router.conversation(id: conversation.id) {
             _currentConversation = refreshed
         }
     }
@@ -263,7 +288,7 @@ class SimpleConversationManager {
     /// should treat nil as "no conversation available yet" and fall back to
     /// `createConversation(...)` so the user isn't blocked.
     func loadLastConversation() -> SimpleConversation? {
-        let conversation = store.mostRecentlyUpdatedConversation()
+        let conversation = router.mostRecentlyUpdatedConversation()
         _currentConversation = conversation
         return conversation
     }
@@ -272,7 +297,7 @@ class SimpleConversationManager {
         if let existing = currentConversation {
             return existing
         }
-        if let mostRecent = store.mostRecentlyUpdatedConversation() {
+        if let mostRecent = router.mostRecentlyUpdatedConversation() {
             currentConversation = mostRecent
             return mostRecent
         }
@@ -348,7 +373,8 @@ class SimpleConversationManager {
             title: simpleConversation.title,
             lastMessage: simpleConversation.messages.last?.content ?? "",
             timestamp: simpleConversation.updatedAt,
-            isRunning: hasAgents || hasActiveRequest
+            isRunning: hasAgents || hasActiveRequest,
+            backend: simpleConversation.backendKind
         )
     }
 }

@@ -50,6 +50,10 @@ struct Conversation {
     /// True when at least one agent/sub-agent/tool run is active for this
     /// conversation. Drives the running-indicator dot in the sidebar row.
     var isRunning: Bool = false
+    /// Execution backend marker — `.local` or `.openclaw`. Drives the small
+    /// backend badge on the conversation row so OpenClaw-backed chats are
+    /// distinguishable from local ones. Defaults to `.local`.
+    var backend: ConversationBackend = .local
 }
 
 struct FunctionCallStruct {

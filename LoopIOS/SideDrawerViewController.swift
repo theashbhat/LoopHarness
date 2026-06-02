@@ -1383,6 +1383,12 @@ class ConversationCell: UITableViewCell {
     private let timestampLabel = UILabel()
     private let separatorView = UIView()
 
+    /// Title + backend badge laid out horizontally so the badge collapses when
+    /// hidden (local rows look exactly as before).
+    private let titleStack = UIStackView()
+    /// Small "VM" pill shown only for OpenClaw-backed conversations.
+    private let backendBadge = PaddedLabel()
+
     /// Small colored dot indicating an active agent run for this conversation.
     private let runningDot = UIView()
     private let pulseLayer = CALayer()
@@ -1414,9 +1420,30 @@ class ConversationCell: UITableViewCell {
         titleLabel.font = UIFont.systemFont(ofSize: 16, weight: .medium)
         titleLabel.textColor = .label
         titleLabel.numberOfLines = 1
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(titleLabel)
-        
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Backend badge ("VM") — hidden for local conversations.
+        backendBadge.font = UIFont.systemFont(ofSize: 10, weight: .semibold)
+        backendBadge.textColor = .secondaryLabel
+        backendBadge.backgroundColor = UIColor.systemGray.withAlphaComponent(0.18)
+        backendBadge.textInsets = UIEdgeInsets(top: 1, left: 6, bottom: 1, right: 6)
+        backendBadge.layer.cornerRadius = 6
+        backendBadge.layer.masksToBounds = true
+        backendBadge.setContentHuggingPriority(.required, for: .horizontal)
+        backendBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        backendBadge.isHidden = true
+
+        // Title + badge in a horizontal stack so the badge collapses when
+        // hidden, leaving the local-row layout unchanged.
+        titleStack.axis = .horizontal
+        titleStack.spacing = 6
+        titleStack.alignment = .center
+        titleStack.translatesAutoresizingMaskIntoConstraints = false
+        titleStack.addArrangedSubview(titleLabel)
+        titleStack.addArrangedSubview(backendBadge)
+        contentView.addSubview(titleStack)
+
         // Setup last message label
         lastMessageLabel.font = UIFont.systemFont(ofSize: 14)
         lastMessageLabel.textColor = .secondaryLabel
@@ -1441,18 +1468,18 @@ class ConversationCell: UITableViewCell {
             runningDot.widthAnchor.constraint(equalToConstant: 8),
             runningDot.heightAnchor.constraint(equalToConstant: 8),
             runningDot.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-            runningDot.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            runningDot.centerYAnchor.constraint(equalTo: titleStack.centerYAnchor),
 
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            titleLabel.trailingAnchor.constraint(equalTo: timestampLabel.leadingAnchor, constant: -8),
-            
-            timestampLabel.topAnchor.constraint(equalTo: titleLabel.topAnchor),
+            titleStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            titleStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            titleStack.trailingAnchor.constraint(equalTo: timestampLabel.leadingAnchor, constant: -8),
+
+            timestampLabel.topAnchor.constraint(equalTo: titleStack.topAnchor),
             timestampLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             timestampLabel.widthAnchor.constraint(equalToConstant: 60),
-            
-            lastMessageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            lastMessageLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            lastMessageLabel.topAnchor.constraint(equalTo: titleStack.bottomAnchor, constant: 4),
+            lastMessageLabel.leadingAnchor.constraint(equalTo: titleStack.leadingAnchor),
             lastMessageLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             lastMessageLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
             
@@ -1471,6 +1498,14 @@ class ConversationCell: UITableViewCell {
     func configure(with conversation: Conversation, isCurrent: Bool = false) {
         titleLabel.text = conversation.title
         lastMessageLabel.text = conversation.lastMessage
+
+        // Backend badge — only OpenClaw-backed conversations carry one.
+        if conversation.backend == .openclaw {
+            backendBadge.text = "VM"
+            backendBadge.isHidden = false
+        } else {
+            backendBadge.isHidden = true
+        }
         
         let formatter = DateFormatter()
         formatter.dateStyle = .short
@@ -1535,6 +1570,27 @@ class ConversationCell: UITableViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         runningDot.isHidden = true
+        backendBadge.isHidden = true
         stopPulse()
+    }
+}
+
+// MARK: - PaddedLabel
+
+/// A UILabel with configurable text insets — used for the small backend pill
+/// on conversation rows so the rounded background has breathing room.
+final class PaddedLabel: UILabel {
+    var textInsets: UIEdgeInsets = .zero {
+        didSet { invalidateIntrinsicContentSize() }
+    }
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: textInsets))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let base = super.intrinsicContentSize
+        return CGSize(width: base.width + textInsets.left + textInsets.right,
+                      height: base.height + textInsets.top + textInsets.bottom)
     }
 }

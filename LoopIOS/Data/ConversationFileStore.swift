@@ -48,9 +48,13 @@
 
 import Foundation
 
-final class ConversationFileStore {
+final class ConversationFileStore: ConversationStore {
 
     static let shared = ConversationFileStore()
+
+    /// This store owns the local / iCloud backend. Conversations it creates are
+    /// stamped `"local"`.
+    let backendMarker = ConversationBackend.local.rawValue
 
     /// iCloud container declared in the entitlements + Info.plist's
     /// `NSUbiquitousContainers`.
@@ -193,7 +197,7 @@ final class ConversationFileStore {
     // The disk write is dispatched async. Notification posts run on main.
 
     func createConversation(title: String) -> SimpleConversation {
-        let conv = SimpleConversation(title: title)
+        let conv = SimpleConversation(title: title, backend: backendMarker)
         cacheLock.lock()
         cache[conv.id] = conv
         hydratedIds.insert(conv.id) // new, no disk content to wait for
@@ -207,7 +211,8 @@ final class ConversationFileStore {
                                      id: conv.id,
                                      title: conv.title,
                                      createdAt: conv.createdAt,
-                                     updatedAt: conv.updatedAt),
+                                     updatedAt: conv.updatedAt,
+                                     backend: conv.backend),
                             to: self.fileURL(for: conv.id))
             self.cacheLock.lock()
             self.pendingWrites.remove(conv.id)
@@ -231,7 +236,8 @@ final class ConversationFileStore {
                                      id: updated.id,
                                      title: updated.title,
                                      createdAt: updated.createdAt,
-                                     updatedAt: updated.updatedAt),
+                                     updatedAt: updated.updatedAt,
+                                     backend: updated.backend),
                             to: self.fileURL(for: updated.id))
             self.cacheLock.lock()
             self.pendingWrites.remove(updated.id)
@@ -275,7 +281,8 @@ final class ConversationFileStore {
                                      id: convSnapshot.id,
                                      title: convSnapshot.title,
                                      createdAt: convSnapshot.createdAt,
-                                     updatedAt: convSnapshot.updatedAt),
+                                     updatedAt: convSnapshot.updatedAt,
+                                     backend: convSnapshot.backend),
                             to: url)
             self.cacheLock.lock()
             self.pendingWrites.remove(id)
@@ -394,7 +401,8 @@ final class ConversationFileStore {
             title: meta.title,
             messages: [],
             createdAt: meta.createdAt,
-            updatedAt: meta.updatedAt
+            updatedAt: meta.updatedAt,
+            backend: meta.backend
         )
     }
 
@@ -496,6 +504,7 @@ final class ConversationFileStore {
         var title = "Untitled"
         var createdAt = Date()
         var updatedAt = Date()
+        var backend: String? = nil
         var foundMeta = false
         var messages: [SimpleMessage] = []
 
@@ -511,6 +520,7 @@ final class ConversationFileStore {
                         title = meta.title
                         createdAt = meta.createdAt
                         updatedAt = meta.updatedAt
+                        backend = meta.backend
                         foundMeta = true
                     }
                 case "msg":
@@ -527,7 +537,7 @@ final class ConversationFileStore {
         messages.sort { $0.createdAt < $1.createdAt }
         return SimpleConversation(
             id: fallbackId, title: title, messages: messages,
-            createdAt: createdAt, updatedAt: updatedAt
+            createdAt: createdAt, updatedAt: updatedAt, backend: backend
         )
     }
 
@@ -676,7 +686,8 @@ final class ConversationFileStore {
             _type: "meta", id: conversation.id,
             title: conversation.title,
             createdAt: conversation.createdAt,
-            updatedAt: conversation.updatedAt
+            updatedAt: conversation.updatedAt,
+            backend: conversation.backend
         )) {
             body.append(metaData); body.append(0x0A)
         }
@@ -782,6 +793,9 @@ private struct MetaLine: Codable {
     let title: String
     let createdAt: Date
     let updatedAt: Date
+    /// Execution backend marker. Optional so meta lines written before this
+    /// field existed decode cleanly (and are treated as local on read).
+    var backend: String? = nil
 }
 
 private struct MessageLineEnvelope: Encodable {

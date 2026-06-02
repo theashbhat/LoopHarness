@@ -176,6 +176,18 @@ final class SSHSkill {
             throw SSHSkillError.connectionFailed(
                 "SSH is not configured. Set host, username, and private key in Settings → SSH.")
         }
+        return try await runCommand(command, on: config, timeout: timeout)
+    }
+
+    /// Runs a shell command against an explicitly provided SSH configuration
+    /// rather than the saved default. Used by backends that connect to their
+    /// own host — e.g. the OpenClaw VM conversation store, which talks to the
+    /// endpoint in `OpenClawConfigStore`, not Settings → SSH.
+    func runCommand(_ command: String, on config: SSHConfig, timeout: Double = 30) async throws -> CommandResult {
+        guard config.isConfigured else {
+            throw SSHSkillError.connectionFailed(
+                "SSH is not configured. Host, username, and private key are required.")
+        }
         return try await runSSHCommand(
             host: config.host,
             port: config.port,
