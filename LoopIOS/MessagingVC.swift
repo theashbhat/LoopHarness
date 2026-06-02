@@ -87,6 +87,19 @@ class MessagingVC: UIViewController {
     
     var messageIdToAnimate: String?
 
+    /// Live partial assistant text for the in-flight turn, accumulated from
+    /// streaming deltas and rendered in the trailing placeholder cell — the
+    /// same row that otherwise shows the "Thinking…" shimmer. Kept separate
+    /// from `messages` so persistence, tool-call handling, and the final
+    /// `processMessage` append stay untouched: when the full response lands
+    /// this is cleared and the placeholder is replaced by the real bubble.
+    private var streamingPartial = ""
+    /// True once any delta has arrived this turn, so the final bubble can
+    /// skip the type-on reveal for text the user already watched stream in.
+    private var streamedCurrentTurn = false
+    /// Coalesces bursts of deltas into one UI update per run-loop turn.
+    private var streamRenderScheduled = false
+
     /// Light tap fired when the user commits a message — a soft button-press
     /// confirmation. Kept lazy so we don't spin the haptic engine for users
     /// who never send (cold-launched into a transcript they only read).
@@ -935,7 +948,8 @@ extension MessagingVC: MessageBoxDelegate {
 
         let reqConvId = conversation.id
         let context = self.contextMessages(for: reqConvId)
-        Cloud.connection.chat(messages: context) { responseMessage, error in
+        self.beginStreamingTurn()
+        Cloud.connection.chat(messages: context, onPartial: self.streamingPartialHandler(for: reqConvId)) { responseMessage, error in
             if self.currentConversationEntity?.id == reqConvId {
                 self.ai_state = .None
             }
@@ -1075,7 +1089,8 @@ extension MessagingVC: MessageBoxDelegate {
         )
 
         let initialContext = self.chatContextMessages
-        Cloud.connection.chat(messages: initialContext) { responseMessage, error in
+        self.beginStreamingTurn()
+        Cloud.connection.chat(messages: initialContext, onPartial: self.streamingPartialHandler(for: requestConversationId)) { responseMessage, error in
             if self.currentConversationEntity?.id == requestConversationId {
                 self.ai_state = .None
             }
@@ -1204,6 +1219,67 @@ extension MessagingVC: MessageBoxDelegate {
         }
     }
 
+    // MARK: - Live streaming
+
+    /// Build the per-turn partial-text handler passed to
+    /// `Cloud.connection.chat`. Fires on URLSession's delegate queue, so it
+    /// hops to main and drops deltas for a conversation the user has since
+    /// navigated away from (or one whose turn already finalized).
+    private func streamingPartialHandler(for convId: String?) -> (String) -> Void {
+        return { [weak self] delta in
+            DispatchQueue.main.async {
+                guard let self = self,
+                      self.currentConversationEntity?.id == convId,
+                      self.ai_state != .None else { return }
+                self.appendStreamingDelta(delta)
+            }
+        }
+    }
+
+    /// Reset the live-stream buffer at the start of a turn. Called right
+    /// before each `Cloud.connection.chat` so the placeholder starts empty.
+    private func beginStreamingTurn() {
+        streamingPartial = ""
+        streamedCurrentTurn = false
+    }
+
+    /// Append a delta (main thread) and schedule a coalesced render.
+    private func appendStreamingDelta(_ delta: String) {
+        streamingPartial += delta
+        streamedCurrentTurn = true
+        guard !streamRenderScheduled else { return }
+        streamRenderScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.streamRenderScheduled = false
+            self.renderStreamingPartial()
+        }
+    }
+
+    /// Update the trailing placeholder cell in place with the accumulated
+    /// partial text, growing its height via begin/endUpdates rather than a
+    /// full reload (which would dump scroll position and restart animations).
+    private func renderStreamingPartial() {
+        guard ai_state != .None, !streamingPartial.isEmpty else { return }
+        let ip = IndexPath(row: visible_messages.count, section: 0)
+        guard let cell = tableView.cellForRow(at: ip) as? MessagingCell else { return }
+        let partial = MessageStruct(role: "assistant",
+                                    content: streamingPartial,
+                                    model: ModelSelectionStore.current.stampedMessageModel)
+        cell.setData(data: partial, shouldAnimate: false)
+        // Only auto-follow if the user is already pinned near the bottom, so
+        // streaming doesn't yank the view while they're scrolled up reading.
+        let nearBottom = tableView.contentOffset.y
+            >= tableView.contentSize.height - tableView.bounds.height - 120
+        UIView.performWithoutAnimation {
+            tableView.beginUpdates()
+            tableView.endUpdates()
+        }
+        if nearBottom {
+            tableView.scrollToRow(at: ip, at: .bottom, animated: false)
+        }
+    }
+
     func processMessage(message: MessageStruct, requestConversationId: String? = nil) {
         let targetConvId = requestConversationId ?? activeRequestConversationId ?? currentConversationEntity?.id
 
@@ -1223,7 +1299,10 @@ extension MessagingVC: MessageBoxDelegate {
                 if isViewing {
                     self.ai_state = .None
                     VoiceLoopCoordinator.shared.setState(.idle)
-                    DispatchQueue.main.async { self.tableView.reloadData() }
+                    DispatchQueue.main.async {
+                        self.streamingPartial = ""
+                        self.tableView.reloadData()
+                    }
                 }
                 return
             }
@@ -1250,12 +1329,20 @@ extension MessagingVC: MessageBoxDelegate {
                 AgentActivityLog.shared.setAssistantTranscript(message.content)
                 VoiceLoopCoordinator.shared.publishAcknowledgePulse()
                 self.playMessageSynthesizer(message: message)
-                self.messageIdToAnimate = message.id
+                // Skip the type-on reveal if the text already streamed in —
+                // re-revealing it from alpha 0 would flash content the user
+                // just watched arrive.
+                if !streamedCurrentTurn {
+                    self.messageIdToAnimate = message.id
+                }
                 DispatchQueue.main.async {
                     // Haptic hops to main with the reload so it fires right
                     // as the bubble appears — and so UIFeedbackGenerator's
                     // main-thread requirement is honored when processMessage
                     // is invoked from URLSession's delegate queue.
+                    // Clear the live buffer first so the trailing placeholder
+                    // row collapses as the real bubble takes its place.
+                    self.streamingPartial = ""
                     self.responseHapticGenerator.impactOccurred()
                     self.tableView.reloadData()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
@@ -1279,7 +1366,13 @@ extension MessagingVC: MessageBoxDelegate {
                 self.ai_state = .Thinking(text: self.statusText(for: firstCall))
             }
             self.messages.append(message)
-            DispatchQueue.main.async { self.tableView.reloadData() }
+            DispatchQueue.main.async {
+                // The streamed pre-tool text is now part of the appended
+                // assistant bubble; clear the live buffer so the placeholder
+                // row reverts to the tool-status shimmer.
+                self.streamingPartial = ""
+                self.tableView.reloadData()
+            }
         }
         self.dispatchAllCalls(in: message, requestConversationId: targetConvId)
     }
@@ -1357,7 +1450,8 @@ extension MessagingVC: MessageBoxDelegate {
 
         let reqConvId = conversation.id
         let context = self.contextMessages(for: reqConvId)
-        Cloud.connection.chat(messages: context) { [weak self] responseMessage, error in
+        self.beginStreamingTurn()
+        Cloud.connection.chat(messages: context, onPartial: streamingPartialHandler(for: reqConvId)) { [weak self] responseMessage, error in
             guard let self = self else { return }
             if self.currentConversationEntity?.id == reqConvId {
                 self.ai_state = .None
@@ -2201,7 +2295,17 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         if indexPath.row == self.visible_messages.count {
             let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath) as! MessagingCell
-            cell.setAnimationState(state: self.ai_state)
+            // While streaming, this trailing row shows the partial assistant
+            // text instead of the "Thinking…" shimmer. shouldAnimate is false
+            // because the streaming reveal IS the animation.
+            if !self.streamingPartial.isEmpty {
+                let partial = MessageStruct(role: "assistant",
+                                            content: self.streamingPartial,
+                                            model: ModelSelectionStore.current.stampedMessageModel)
+                cell.setData(data: partial, shouldAnimate: false)
+            } else {
+                cell.setAnimationState(state: self.ai_state)
+            }
             return cell
         }
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath) as! MessagingCell

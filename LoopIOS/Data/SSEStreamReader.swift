@@ -14,15 +14,6 @@
 
 import Foundation
 
-/// Delegate that receives incremental text as it arrives, so the UI can
-/// show partial assistant output before the full response lands. Implement
-/// only if the caller wants live updates; the completion-based flow works
-/// without it.
-protocol SSEStreamDelegate: AnyObject {
-    /// Called on an unspecified queue with each new text delta.
-    func sseStream(didReceiveDelta text: String)
-}
-
 /// Assembles a streamed OpenAI-compatible chat completion into a single
 /// `MessageStruct`. Handles:
 ///   - Content deltas (`choices[0].delta.content`)
@@ -43,7 +34,11 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
 
     private let completion: (Swift.Result<Result, Error>) -> Void
     private var metrics: InferenceMetrics
-    private weak var delegate: SSEStreamDelegate?
+    /// Fired on the URLSession delegate queue with each text delta as it
+    /// arrives, so the UI can show partial output before the full response
+    /// lands. Held strongly: the reader is owned by the session router only
+    /// for the request's lifetime, so there's no retain cycle to weaken.
+    private let onDelta: ((String) -> Void)?
 
     // Accumulation state
     private var contentBuffer = ""
@@ -69,10 +64,10 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
     private var receivedFirstChunk = false
 
     init(metrics: InferenceMetrics,
-         delegate: SSEStreamDelegate? = nil,
+         onDelta: ((String) -> Void)? = nil,
          completion: @escaping (Swift.Result<Result, Error>) -> Void) {
         self.metrics = metrics
-        self.delegate = delegate
+        self.onDelta = onDelta
         self.completion = completion
     }
 
@@ -127,7 +122,7 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
             processLine(lineBuffer)
             lineBuffer = ""
         }
-        finalize()
+        finalizeResult()
     }
 
     // MARK: - SSE line processing
@@ -167,7 +162,7 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
         // Content delta
         if let text = delta["content"] as? String, !text.isEmpty {
             contentBuffer += text
-            delegate?.sseStream(didReceiveDelta: text)
+            onDelta?(text)
         }
 
         // Reasoning content delta
@@ -192,7 +187,7 @@ final class SSEStreamReader: NSObject, URLSessionDataDelegate {
 
     // MARK: - Finalize
 
-    private func finalize() {
+    private func finalizeResult() {
         let calls: [FunctionCallStruct] = toolCallAccumulators
             .sorted { $0.key < $1.key }
             .map { (_, acc) in

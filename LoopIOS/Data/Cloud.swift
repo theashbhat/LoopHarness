@@ -10,7 +10,7 @@ import Foundation
 class Cloud {
     static let connection = Cloud()
 
-    func chat(messages: [MessageStruct], tools: [[String: Any]]? = nil, completion: @escaping(MessageStruct?, Error?) -> Void) {
-        AgentHarness.shared.chat(messages: messages, tools: tools, completion: completion)
+    func chat(messages: [MessageStruct], tools: [[String: Any]]? = nil, onPartial: ((String) -> Void)? = nil, completion: @escaping(MessageStruct?, Error?) -> Void) {
+        AgentHarness.shared.chat(messages: messages, tools: tools, onPartial: onPartial, completion: completion)
     }
 }

@@ -331,6 +331,7 @@ final class AgentHarness {
     /// message as the "base instructions"), then dispatches.
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              onPartial: ((String) -> Void)? = nil,
               completion: @escaping(MessageStruct?, Error?) -> Void) {
 
         // Slash commands short-circuit before any inference call. The latest
@@ -404,11 +405,11 @@ final class AgentHarness {
         // (handled by the `.apple` branch above).
         switch ModelSelectionStore.current.provider {
         case .anthropic:
-            AnthropicChat.shared.chat(messages: rebuilt, tools: toolsToSend, completion: completion)
+            AnthropicChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
         case .openAI:
-            OpenAIChat.shared.chat(messages: rebuilt, tools: toolsToSend, completion: completion)
+            OpenAIChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
         case .fireworks:
-            FireworksChat.shared.chat(messages: rebuilt, tools: toolsToSend, completion: completion)
+            FireworksChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
         case .apple:
             // Unreachable — `.apple` returned via offlineRespond above. Kept
             // so the switch stays exhaustive if providers are added.

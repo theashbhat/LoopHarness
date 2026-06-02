@@ -71,6 +71,7 @@ final class OpenAIChat {
     /// a tool.
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
         guard let apiKey = KeyStore.shared.value(for: .openAI),
@@ -131,7 +132,7 @@ final class OpenAIChat {
 
         metrics.willSendRequest()
 
-        let reader = SSEStreamReader(metrics: metrics) { result in
+        let reader = SSEStreamReader(metrics: metrics, onDelta: onPartial) { result in
             switch result {
             case .success(let r):
                 let msg = MessageStruct(

@@ -20,7 +20,9 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
 
     private let completion: (Swift.Result<Result, Error>) -> Void
     private var metrics: InferenceMetrics
-    private weak var delegate: SSEStreamDelegate?
+    /// Fired on the URLSession delegate queue with each text delta as it
+    /// arrives. Held strongly — see `SSEStreamReader.onDelta`.
+    private let onDelta: ((String) -> Void)?
 
     private var contentBuffer = ""
     private var inputTokens: Int = 0
@@ -42,10 +44,10 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
     private var receivedFirstChunk = false
 
     init(metrics: InferenceMetrics,
-         delegate: SSEStreamDelegate? = nil,
+         onDelta: ((String) -> Void)? = nil,
          completion: @escaping (Swift.Result<Result, Error>) -> Void) {
         self.metrics = metrics
-        self.delegate = delegate
+        self.onDelta = onDelta
         self.completion = completion
     }
 
@@ -95,7 +97,7 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
             processLine(lineBuffer)
             lineBuffer = ""
         }
-        finalize()
+        finalizeResult()
     }
 
     // MARK: - SSE parsing
@@ -142,7 +144,7 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
 
             if deltaType == "text_delta", let text = delta["text"] as? String {
                 contentBuffer += text
-                delegate?.sseStream(didReceiveDelta: text)
+                onDelta?(text)
             } else if deltaType == "input_json_delta",
                       let partial = delta["partial_json"] as? String {
                 toolUseBlocks[idx]?.inputJSON += partial
@@ -161,7 +163,7 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
 
     // MARK: - Finalize
 
-    private func finalize() {
+    private func finalizeResult() {
         let calls: [FunctionCallStruct] = toolUseBlocks
             .sorted { $0.key < $1.key }
             .map { (_, acc) in

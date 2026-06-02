@@ -59,6 +59,7 @@ final class AnthropicChat {
 
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
         guard let apiKey = KeyStore.shared.value(for: .anthropic),
@@ -130,7 +131,7 @@ final class AnthropicChat {
 
         metrics.willSendRequest()
 
-        let reader = AnthropicStreamReader(metrics: metrics) { result in
+        let reader = AnthropicStreamReader(metrics: metrics, onDelta: onPartial) { result in
             switch result {
             case .success(let r):
                 let msg = MessageStruct(
