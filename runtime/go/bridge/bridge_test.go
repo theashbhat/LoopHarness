@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/bridge"
+	"github.com/getathelas/LoopHarness/runtime/go/bridge"
 )
 
 // fakeAPNs records pushes and optionally fails.

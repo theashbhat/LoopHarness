@@ -9,13 +9,31 @@
 //  remaining fully editable.
 //
 //  Saving: an explicit Save button plus an automatic save when the editor is
-//  dismissed with unsaved changes, so edits are never silently lost. Writes
-//  go through Workspace's coordinated I/O so iCloud sees them atomically.
+//  dismissed with unsaved changes, so edits are never silently lost. Local
+//  writes go through Workspace's coordinated I/O so iCloud sees them atomically;
+//  remote (OpenClaw VM) files load/save over SSH via an injected backend.
 //
 
 import UIKit
 
 final class MarkdownEditorViewController: UIViewController {
+
+    /// Where the editor's bytes live. Local files use Workspace coordinated I/O;
+    /// remote files load/save over SSH through the injected closures so one
+    /// editor UI serves both the on-device workspace and a joined VM workspace.
+    enum Source {
+        case local(URL)
+        case remote(name: String,
+                    load: () async throws -> String,
+                    save: (String) async throws -> Void)
+
+        var displayName: String {
+            switch self {
+            case .local(let url):      return url.lastPathComponent
+            case .remote(let name, _, _): return name
+            }
+        }
+    }
 
     // MARK: - Entry points
 
@@ -23,9 +41,18 @@ final class MarkdownEditorViewController: UIViewController {
         MarkdownSourceHighlighter.isMarkdownFile(url)
     }
 
+    static func isMarkdownFile(name: String) -> Bool {
+        MarkdownSourceHighlighter.isMarkdownFile(URL(fileURLWithPath: name))
+    }
+
     /// Wrap in a nav controller and present full-screen from `presenter`.
     static func present(for url: URL, from presenter: UIViewController) {
-        let editor = MarkdownEditorViewController(fileURL: url)
+        present(source: .local(url), from: presenter)
+    }
+
+    /// Present an editor over any `Source` (local or remote).
+    static func present(source: Source, from presenter: UIViewController) {
+        let editor = MarkdownEditorViewController(source: source)
         let nav = UINavigationController(rootViewController: editor)
         nav.modalPresentationStyle = .fullScreen
         presenter.present(nav, animated: true)
@@ -33,7 +60,7 @@ final class MarkdownEditorViewController: UIViewController {
 
     // MARK: - State
 
-    private let fileURL: URL
+    private let source: Source
     private let baseFontSize: CGFloat = 16
 
     /// Last on-disk contents. `isDirty` is the buffer diverging from this.
@@ -53,9 +80,13 @@ final class MarkdownEditorViewController: UIViewController {
 
     // MARK: - Init
 
-    init(fileURL: URL) {
-        self.fileURL = fileURL
+    init(source: Source) {
+        self.source = source
         super.init(nibName: nil, bundle: nil)
+    }
+
+    convenience init(fileURL: URL) {
+        self.init(source: .local(fileURL))
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -83,7 +114,7 @@ final class MarkdownEditorViewController: UIViewController {
     // MARK: - Setup
 
     private func configureNavigationItem() {
-        navigationItem.title = fileURL.lastPathComponent
+        navigationItem.title = source.displayName
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
         saveButton.isEnabled = false
@@ -132,23 +163,34 @@ final class MarkdownEditorViewController: UIViewController {
     // MARK: - Load
 
     private func loadFile() {
-        ioQueue.async { [weak self] in
-            guard let self = self else { return }
-            // iCloud-evicted files need a pull-down first; best-effort and
-            // time-boxed like the QuickLook path the editor replaces.
-            try? Workspace.shared.ensureDownloaded(self.fileURL)
-            let result: Result<String, Error>
-            do {
-                let data = try Data(contentsOf: self.fileURL)
-                result = .success(String(decoding: data, as: UTF8.self))
-            } catch {
-                result = .failure(error)
+        switch source {
+        case .local(let url):
+            ioQueue.async { [weak self] in
+                guard let self = self else { return }
+                // iCloud-evicted files need a pull-down first; best-effort and
+                // time-boxed like the QuickLook path the editor replaces.
+                try? Workspace.shared.ensureDownloaded(url)
+                let result: Result<String, Error>
+                do {
+                    let data = try Data(contentsOf: url)
+                    result = .success(String(decoding: data, as: UTF8.self))
+                } catch {
+                    result = .failure(error)
+                }
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let contents): self.applyLoaded(contents)
+                    case .failure(let error):    self.presentLoadError(error)
+                    }
+                }
             }
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let contents):
+        case .remote(_, let load, _):
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                do {
+                    let contents = try await load()
                     self.applyLoaded(contents)
-                case .failure(let error):
+                } catch {
                     self.presentLoadError(error)
                 }
             }
@@ -213,20 +255,32 @@ final class MarkdownEditorViewController: UIViewController {
     private func persist(_ contents: String) {
         savedText = contents
         updateSaveButton()
-        ioQueue.async { [weak self] in
-            guard let self = self else { return }
-            let writeError: Error?
-            do {
-                let data = Data(contents.utf8)
-                try Workspace.shared.coordinatedWrite(to: self.fileURL) { target in
-                    try data.write(to: target, options: .atomic)
+        switch source {
+        case .local(let url):
+            ioQueue.async { [weak self] in
+                guard let self = self else { return }
+                let writeError: Error?
+                do {
+                    let data = Data(contents.utf8)
+                    try Workspace.shared.coordinatedWrite(to: url) { target in
+                        try data.write(to: target, options: .atomic)
+                    }
+                    writeError = nil
+                } catch {
+                    writeError = error
                 }
-                writeError = nil
-            } catch {
-                writeError = error
+                if let error = writeError {
+                    DispatchQueue.main.async { self.presentSaveError(error) }
+                }
             }
-            if let error = writeError {
-                DispatchQueue.main.async { self.presentSaveError(error) }
+        case .remote(_, _, let save):
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                do {
+                    try await save(contents)
+                } catch {
+                    self.presentSaveError(error)
+                }
             }
         }
     }

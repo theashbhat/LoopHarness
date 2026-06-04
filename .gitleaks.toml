@@ -12,6 +12,10 @@ paths = [
   '''\.env\.example''',
   '''Secrets\.xcconfig\.example''',
   '''SECURITY\.md''',
+  # Setup guide: documents GitHub secret *names* (e.g. the env var
+  # IOS_DISTRIBUTION_CERTIFICATE_P12), not secret values. generic-api-key
+  # matches those high-entropy names in the "Store in GitHub secrets:" prose.
+  '''docs/TESTFLIGHT\.md''',
 ]
 
 regexes = [
@@ -32,3 +36,14 @@ description = "Doc-comment PEM header references in SSHSkill (no key material)"
 condition = "AND"
 paths = ['''LoopIOS/Skills/SSH/SSHSkill\.swift''']
 regexes = ['''-----BEGIN OPENSSH PRIVATE KEY-----`\), ed25519 \+ ECDSA''']
+
+# OpenClawGatewayClient declares an ed25519 device identity whose `privateKey`
+# property is typed as the CryptoKit value type `Curve25519.Signing.PrivateKey`.
+# generic-api-key matches the `privateKey: <high-entropy type>` declaration even
+# though it holds no key material (the value is generated at runtime). Scope to
+# the file AND the type reference so the rule stays fully active elsewhere.
+[[allowlists]]
+description = "CryptoKit private-key type declaration in OpenClawGatewayClient (no key material)"
+condition = "AND"
+paths = ['''LoopIOS/Runner/OpenClawGatewayClient\.swift''']
+regexes = ['''Curve25519\.Signing\.PrivateKey''']

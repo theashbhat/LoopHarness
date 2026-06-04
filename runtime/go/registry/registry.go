@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/bridge"
+	"github.com/getathelas/LoopHarness/runtime/go/bridge"
 )
 
 // Tag determines where a tool executes.

@@ -32,12 +32,34 @@ final class FireworksChat {
         return URLSession(configuration: config)
     }()
 
+    private lazy var streamingSessionDelegate: StreamingSessionDelegateRouter = {
+        StreamingSessionDelegateRouter()
+    }()
+    private lazy var streamingSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 180
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config, delegate: streamingSessionDelegate, delegateQueue: nil)
+    }()
+
     private let endpoint = URL(string: "https://api.fireworks.ai/inference/v1/chat/completions")!
+
+    // MARK: - Prompt caching
+    //
+    // Fireworks supports automatic prefix caching on their OpenAI-
+    // compatible endpoint. Like OpenAI, no explicit request parameter
+    // is needed — the server detects repeated prefixes and serves them
+    // from KV cache. To maximize hit rate we rely on the same ordering
+    // invariant the harness already maintains: system → tools → history
+    // → latest user message. Fireworks does not currently expose a
+    // response field reporting cache hits, so we log latency only.
 
     private let maxCompletionTokens = 4096
 
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
         guard let apiKey = KeyStore.shared.value(for: .fireworks),
@@ -59,10 +81,16 @@ final class FireworksChat {
             body["tool_choice"] = "auto"
         }
 
+        body["stream"] = true
+        body["stream_options"] = ["include_usage": true]
+
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
             completion(nil, Self.error("Failed to encode the Fireworks request body."))
             return
         }
+
+        var metrics = InferenceMetrics(provider: "Fireworks", model: modelID, toolCount: (tools ?? []).count)
+        metrics.didBuildPayload(bytes: payload.count)
 
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
@@ -71,63 +99,27 @@ final class FireworksChat {
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("FireworksChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count)")
-        let task = session.dataTask(with: req) { data, response, error in
-            if let error = error {
-                completion(nil, Self.error("Network error talking to Fireworks: \(error.localizedDescription)"))
-                return
-            }
-            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                let bodyStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                let detail = Self.errorDetail(from: bodyStr) ?? "HTTP \(http.statusCode)"
-                completion(nil, Self.error("Fireworks API error: \(detail)"))
-                return
-            }
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any] else {
-                completion(nil, Self.error("Fireworks returned an unexpected payload."))
-                return
-            }
+        metrics.willSendRequest()
 
-            let calls: [FunctionCallStruct]
-            if let toolCalls = message["tool_calls"] as? [[String: Any]] {
-                calls = toolCalls.compactMap { entry in
-                    guard let fn = entry["function"] as? [String: Any],
-                          let name = fn["name"] as? String else { return nil }
-                    let argsString = fn["arguments"] as? String ?? "{}"
-                    var argsDict: [String: Any] = [:]
-                    if let d = argsString.data(using: .utf8),
-                       let parsed = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                        argsDict = parsed
-                    }
-                    let id = entry["id"] as? String
-                    return FunctionCallStruct(name: name, arguments: argsDict, callId: id)
-                }
-            } else {
-                calls = []
+        let reader = SSEStreamReader(metrics: metrics, onDelta: onPartial) { result in
+            switch result {
+            case .success(let r):
+                let msg = MessageStruct(
+                    role: "assistant",
+                    content: r.content,
+                    model: ModelSelectionStore.current.stampedMessageModel,
+                    functions: r.toolCalls,
+                    reasoningContent: r.reasoningContent,
+                    tokenUsage: r.usage,
+                    ttft: r.ttft)
+                completion(msg, nil)
+            case .failure(let error):
+                completion(nil, Self.error("Fireworks streaming error: \(error.localizedDescription)"))
             }
-            let content = (message["content"] as? String) ?? ""
-            let reasoning = message["reasoning_content"] as? String
-            var usage: TokenUsage? = nil
-            if let u = json["usage"] as? [String: Any],
-               let prompt = u["prompt_tokens"] as? Int,
-               let comp = u["completion_tokens"] as? Int,
-               let total = u["total_tokens"] as? Int {
-                usage = TokenUsage(promptTokens: prompt,
-                                   completionTokens: comp,
-                                   totalTokens: total)
-            }
-            let msg = MessageStruct(
-                role: "assistant",
-                content: content,
-                model: ModelSelectionStore.current.stampedMessageModel,
-                functions: calls,
-                reasoningContent: reasoning,
-                tokenUsage: usage)
-            completion(msg, nil)
         }
+
+        let task = streamingSession.dataTask(with: req)
+        streamingSessionDelegate.register(task: task, reader: reader)
         task.resume()
     }
 

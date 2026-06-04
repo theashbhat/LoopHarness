@@ -99,7 +99,7 @@ final class ConversationsSidebarViewController: NSViewController,
 
         // Sync indicators sit under the segmented control. We start them
         // hidden; the notification observer below flips them on/off based on
-        // `ConversationFileStore.shared.isSyncing`.
+        // `SimpleConversationManager.shared.router.isSyncing`.
         syncSpinner.translatesAutoresizingMaskIntoConstraints = false
         syncSpinner.style = .spinning
         syncSpinner.controlSize = .small
@@ -256,7 +256,10 @@ final class ConversationsSidebarViewController: NSViewController,
     }
 
     func reload() {
-        conversations = ConversationFileStore.shared.allConversations()
+        // Route through the manager so OpenClaw-backed conversations appear
+        // alongside local ones. For local-only users the OpenClaw store is
+        // empty, so the merged result is identical to before.
+        conversations = SimpleConversationManager.shared.getAllConversations()
         tableView.reloadData()
         updateEmptyLabel()
         // Re-apply selection after reloadData clears it.
@@ -268,7 +271,7 @@ final class ConversationsSidebarViewController: NSViewController,
     private func updateEmptyLabel() {
         if conversations.isEmpty {
             emptyLabel.isHidden = false
-            emptyLabel.stringValue = ConversationFileStore.shared.isSyncing
+            emptyLabel.stringValue = SimpleConversationManager.shared.router.isSyncing
                 ? "⏳ Loading conversations…"
                 : "No conversations yet.\nStart talking to Loop and one will appear here."
         } else {
@@ -277,7 +280,7 @@ final class ConversationsSidebarViewController: NSViewController,
     }
 
     private func applySyncState() {
-        let syncing = ConversationFileStore.shared.isSyncing
+        let syncing = SimpleConversationManager.shared.router.isSyncing
         if syncing {
             syncSpinner.startAnimation(nil)
         } else {

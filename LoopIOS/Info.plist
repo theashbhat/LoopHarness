@@ -112,6 +112,7 @@
 		<string>audio</string>
 		<string>fetch</string>
 		<string>processing</string>
+		<string>remote-notification</string>
 	</array>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Loop reads your Health data (steps, distance, workouts, heart rate, sleep) so the assistant can answer questions about your activity and wellness. Your data stays on device and is never sent to analytics.</string>
@@ -123,6 +124,7 @@
 	<array>
 		<string>com.bhat.intel.scheduler.prefetch</string>
 		<string>com.loop.runner.poll</string>
+		<string>com.loop.openclaw.poll</string>
 	</array>
 </dict>
 </plist>

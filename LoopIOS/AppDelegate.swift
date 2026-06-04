@@ -42,7 +42,29 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // happen before didFinishLaunchingWithOptions returns.
         LoopRunnerPoller.shared.bootstrap()
 
+        // OpenClaw message poller — watches the OpenClaw execution backend(s) for
+        // new messages and notifies. Also registers a BGAppRefreshTask handler, so
+        // it likewise must run before this method returns.
+        OpenClawMessagePoller.shared.bootstrap()
+
+        // APNs registration hooks (inert by default): only registers if the user
+        // has already authorized notifications, so no new prompt. The VM-side
+        // sender that would push on agent completion is not built yet.
+        PushRegistration.shared.registerIfAuthorized()
+
         return true
+    }
+
+    // MARK: - Remote notification registration
+
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        PushRegistration.shared.didRegister(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication,
+                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        PushRegistration.shared.didFailToRegister(error: error)
     }
 
     func applicationWillResignActive(_ application: UIApplication) {
@@ -97,6 +119,15 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         defer { completionHandler() }
 
         let userInfo = response.notification.request.content.userInfo
+
+        // OpenClaw message notifications — route into the conversation that got
+        // the new message. The poller pre-loaded its transcript into the store
+        // cache, so this renders immediately.
+        if OpenClawMessagePoller.isMessageNotification(userInfo),
+           let conversationId = OpenClawMessagePoller.conversationId(from: userInfo) {
+            openPrefetchedConversation(id: conversationId)
+            return
+        }
 
         // Runner notifications — open the app; the turn id is in userInfo
         // for future deep-linking. For now just foreground the app.

@@ -37,7 +37,33 @@ final class OpenAIChat {
         return URLSession(configuration: config)
     }()
 
+    /// Dedicated session for streaming requests — uses a delegate-based flow
+    /// so `URLSessionDataDelegate` receives incremental chunks.
+    private lazy var streamingSessionDelegate: StreamingSessionDelegateRouter = {
+        StreamingSessionDelegateRouter()
+    }()
+    private lazy var streamingSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 180
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config, delegate: streamingSessionDelegate, delegateQueue: nil)
+    }()
+
     private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
+
+    // MARK: - Prompt caching
+    //
+    // OpenAI applies automatic prefix caching for prompts ≥1024 tokens
+    // when the prefix is identical across requests. No explicit API
+    // parameter is required. To maximize cache hit rate:
+    //   1. System message (stable) comes first.
+    //   2. Tool schemas (stable) are sent in a consistent order.
+    //   3. Dynamic/volatile content (user turns, timestamps) comes last.
+    // The harness already composes messages in this order (system →
+    // history → user), so we just need to keep that invariant and not
+    // shuffle tools between requests. Cache hits are reported in
+    // `usage.prompt_tokens_details.cached_tokens`.
 
     /// Maps `[MessageStruct]` → OpenAI chat messages, sends the
     /// (already OpenAI-shaped) tool schemas, and parses the reply back into a
@@ -45,6 +71,7 @@ final class OpenAIChat {
     /// a tool.
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
         guard let apiKey = KeyStore.shared.value(for: .openAI),
@@ -84,10 +111,17 @@ final class OpenAIChat {
             body["tool_choice"] = "auto"
         }
 
+        // Enable streaming + usage reporting.
+        body["stream"] = true
+        body["stream_options"] = ["include_usage": true]
+
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
             completion(nil, Self.error("Failed to encode the OpenAI request body."))
             return
         }
+
+        var metrics = InferenceMetrics(provider: "OpenAI", model: modelID, toolCount: (tools ?? []).count)
+        metrics.didBuildPayload(bytes: payload.count)
 
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
@@ -96,68 +130,27 @@ final class OpenAIChat {
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("OpenAIChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count)")
-        let task = session.dataTask(with: req) { data, response, error in
-            if let error = error {
-                completion(nil, Self.error("Network error talking to OpenAI: \(error.localizedDescription)"))
-                return
-            }
-            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                let bodyStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                let detail = Self.errorDetail(from: bodyStr) ?? "HTTP \(http.statusCode)"
-                // Surface, don't swallow: a wrong model id ("model not
-                // found"), bad/expired key, or quota issue all land here and
-                // the user needs to see it to fix it.
-                completion(nil, Self.error("OpenAI API error: \(detail)"))
-                return
-            }
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any] else {
-                completion(nil, Self.error("OpenAI returned an unexpected payload."))
-                return
-            }
+        metrics.willSendRequest()
 
-            // Collect every `tool_calls` entry — OpenAI returns them as an
-            // array because the model can request multiple tools in parallel
-            // for a single assistant turn. Each carries its own `id` so the
-            // matching `role:"tool"` reply can pair back via `tool_call_id`.
-            let calls: [FunctionCallStruct]
-            if let toolCalls = message["tool_calls"] as? [[String: Any]] {
-                calls = toolCalls.compactMap { entry in
-                    guard let fn = entry["function"] as? [String: Any],
-                          let name = fn["name"] as? String else { return nil }
-                    let argsString = fn["arguments"] as? String ?? "{}"
-                    var argsDict: [String: Any] = [:]
-                    if let d = argsString.data(using: .utf8),
-                       let parsed = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                        argsDict = parsed
-                    }
-                    let id = entry["id"] as? String
-                    return FunctionCallStruct(name: name, arguments: argsDict, callId: id)
-                }
-            } else {
-                calls = []
+        let reader = SSEStreamReader(metrics: metrics, onDelta: onPartial) { result in
+            switch result {
+            case .success(let r):
+                let msg = MessageStruct(
+                    role: "assistant",
+                    content: r.content,
+                    model: ModelSelectionStore.current.stampedMessageModel,
+                    functions: r.toolCalls,
+                    reasoningContent: r.reasoningContent,
+                    tokenUsage: r.usage,
+                    ttft: r.ttft)
+                completion(msg, nil)
+            case .failure(let error):
+                completion(nil, Self.error("OpenAI streaming error: \(error.localizedDescription)"))
             }
-            let content = (message["content"] as? String) ?? ""
-            var usage: TokenUsage? = nil
-            if let u = json["usage"] as? [String: Any],
-               let prompt = u["prompt_tokens"] as? Int,
-               let comp = u["completion_tokens"] as? Int,
-               let total = u["total_tokens"] as? Int {
-                usage = TokenUsage(promptTokens: prompt,
-                                   completionTokens: comp,
-                                   totalTokens: total)
-            }
-            let msg = MessageStruct(
-                role: "assistant",
-                content: content,
-                model: ModelSelectionStore.current.stampedMessageModel,
-                functions: calls,
-                tokenUsage: usage)
-            completion(msg, nil)
         }
+
+        let task = streamingSession.dataTask(with: req)
+        streamingSessionDelegate.register(task: task, reader: reader)
         task.resume()
     }
 

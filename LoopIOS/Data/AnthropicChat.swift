@@ -36,14 +36,30 @@ final class AnthropicChat {
         return URLSession(configuration: config)
     }()
 
+    private lazy var streamingSessionDelegate: StreamingSessionDelegateRouter = {
+        StreamingSessionDelegateRouter()
+    }()
+    private lazy var streamingSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 180
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config, delegate: streamingSessionDelegate, delegateQueue: nil)
+    }()
+
     private let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     private let anthropicVersion = "2023-06-01"
+    /// Opt-in to prompt caching. Sent as a space-separated list in the
+    /// `anthropic-beta` header; the API ignores unknown feature flags so
+    /// this is forward-compatible.
+    private let betaFeatures = "prompt-caching-2024-07-31"
     /// Cap on a single completion. Generous enough for long agent turns
     /// without inviting runaway generations; required by the API.
     private let maxTokens = 4096
 
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
         guard let apiKey = KeyStore.shared.value(for: .anthropic),
@@ -61,80 +77,78 @@ final class AnthropicChat {
             "max_tokens": maxTokens,
             "messages": wire,
         ]
+        // --- Prompt caching: system prompt ---
+        // Anthropic's prompt caching requires `system` to be an array of
+        // content blocks (not a plain string) when cache_control is used.
+        // We mark the entire system prompt as a single cacheable block so
+        // the stable SOUL/USER/MEMORY/AGENTS/TOOLS prefix gets a server-
+        // side cache hit on subsequent turns (5-minute TTL, typically
+        // saving 90%+ of input tokens on multi-turn conversations).
         if let system = system, !system.isEmpty {
-            body["system"] = system
+            body["system"] = [
+                [
+                    "type": "text",
+                    "text": system,
+                    "cache_control": ["type": "ephemeral"],
+                ] as [String: Any]
+            ]
         }
+
+        // --- Prompt caching: tool schemas ---
+        // Tool definitions are stable across turns (they only change when
+        // a dynamic skill is added/removed). Mark the last tool with a
+        // cache breakpoint so the entire tool list is cached together with
+        // the system prompt.
         if let tools = tools, !tools.isEmpty {
-            body["tools"] = Self.anthropicTools(from: tools)
+            var anthropicTools = Self.anthropicTools(from: tools)
+            if !anthropicTools.isEmpty {
+                var lastTool = anthropicTools[anthropicTools.count - 1]
+                lastTool["cache_control"] = ["type": "ephemeral"]
+                anthropicTools[anthropicTools.count - 1] = lastTool
+            }
+            body["tools"] = anthropicTools
             body["tool_choice"] = ["type": "auto"]
         }
+
+        body["stream"] = true
 
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
             completion(nil, Self.error("Failed to encode the Anthropic request body."))
             return
         }
 
+        var metrics = InferenceMetrics(provider: "Anthropic", model: modelID, toolCount: (tools ?? []).count)
+        metrics.didBuildPayload(bytes: payload.count)
+
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
+        req.setValue(betaFeatures, forHTTPHeaderField: "anthropic-beta")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = payload
         req.timeoutInterval = 120
 
-        print("AnthropicChat: POST \(endpoint) model=\(modelID) tools=\((tools ?? []).count)")
-        let task = session.dataTask(with: req) { data, response, error in
-            if let error = error {
-                completion(nil, Self.error("Network error talking to Anthropic: \(error.localizedDescription)"))
-                return
-            }
-            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                let bodyStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
-                let detail = Self.errorDetail(from: bodyStr) ?? "HTTP \(http.statusCode)"
-                // Surface, don't swallow — wrong model id, bad key, or quota
-                // all land here and the user needs to see it.
-                completion(nil, Self.error("Anthropic API error: \(detail)"))
-                return
-            }
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let blocks = json["content"] as? [[String: Any]] else {
-                completion(nil, Self.error("Anthropic returned an unexpected payload."))
-                return
-            }
+        metrics.willSendRequest()
 
-            // Collect every `tool_use` block — Anthropic emits them in parallel
-            // for multi-step plans ("create note then move it then post link"),
-            // and dropping all but the first stalled the agent loop after one
-            // tool. Each call carries the provider id so the next user turn can
-            // pair `tool_result` blocks back via `tool_use_id`.
-            let calls: [FunctionCallStruct] = blocks.compactMap { block in
-                guard (block["type"] as? String) == "tool_use",
-                      let name = block["name"] as? String else { return nil }
-                let input = (block["input"] as? [String: Any]) ?? [:]
-                let id = block["id"] as? String
-                return FunctionCallStruct(name: name, arguments: input, callId: id)
+        let reader = AnthropicStreamReader(metrics: metrics, onDelta: onPartial) { result in
+            switch result {
+            case .success(let r):
+                let msg = MessageStruct(
+                    role: "assistant",
+                    content: r.content,
+                    model: ModelSelectionStore.current.stampedMessageModel,
+                    functions: r.toolCalls,
+                    tokenUsage: r.usage,
+                    ttft: r.ttft)
+                completion(msg, nil)
+            case .failure(let error):
+                completion(nil, Self.error("Anthropic streaming error: \(error.localizedDescription)"))
             }
-            let text = blocks
-                .filter { ($0["type"] as? String) == "text" }
-                .compactMap { $0["text"] as? String }
-                .joined(separator: "\n")
-            var usage: TokenUsage? = nil
-            if let u = json["usage"] as? [String: Any],
-               let input = u["input_tokens"] as? Int,
-               let output = u["output_tokens"] as? Int {
-                usage = TokenUsage(promptTokens: input,
-                                   completionTokens: output,
-                                   totalTokens: input + output)
-            }
-            let msg = MessageStruct(
-                role: "assistant",
-                content: text,
-                model: ModelSelectionStore.current.stampedMessageModel,
-                functions: calls,
-                tokenUsage: usage)
-            completion(msg, nil)
         }
+
+        let task = streamingSession.dataTask(with: req)
+        streamingSessionDelegate.register(task: task, reader: reader)
         task.resume()
     }
 
@@ -398,6 +412,15 @@ final class AnthropicChat {
                 "data": data.base64EncodedString(),
             ],
         ]
+    }
+
+    // MARK: - Test support
+
+    /// Expose `anthropicTools(from:)` for unit tests. Production code should
+    /// call through `chat(messages:tools:completion:)` which applies caching
+    /// annotations on top.
+    static func testableAnthropicTools(from tools: [[String: Any]]) -> [[String: Any]] {
+        anthropicTools(from: tools)
     }
 
     // MARK: - Errors

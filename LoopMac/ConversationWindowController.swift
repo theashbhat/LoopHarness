@@ -57,6 +57,11 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
     private weak var splitVC: NSSplitViewController?
     private static let composeToolbarIdentifier = NSToolbarItem.Identifier("loop.toolbar.compose")
 
+    /// Messages from the last `rebuild(messages:)` call. Kept so the
+    /// "Branch conversation from here" context menu can map a row view
+    /// back to the corresponding slice of messages.
+    private var lastRebuiltMessages: [SimpleMessage] = []
+
     /// Live state for any image the user has generated this session, keyed by
     /// attachment id. The persisted store carries the placeholder message
     /// (id = "image-<attachmentId>") but not the attachment itself, so this
@@ -866,8 +871,9 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         // map survives so we can re-render their state below.
         imageBubbles.removeAll()
         pdfBubbles.removeAll()
+        lastRebuiltMessages = messages
         let manager = SimpleConversationManager.shared
-        for message in messages {
+        for (messageIndex, message) in messages.enumerated() {
             // Map embed and share_file results ride on a function-role
             // message (the tool result whose only surface is the rendered
             // visual). Surface them before the role switch so they don't
@@ -891,6 +897,8 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             }
             switch message.role {
             case "user", "assistant":
+                let viewCountBefore = stack.arrangedSubviews.count
+
                 // image-prefixed assistant rows are placeholder messages from
                 // a generate_image call. The attachment itself isn't in the
                 // store; pull the live state from imageAttachments and render
@@ -910,16 +918,13 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                     }
                     imageBubbles[attachmentId] = bubble
                     stack.addArrangedSubview(makeImageRow(bubbleView: bubble))
-                    continue
-                }
-
-                // pdf-prefixed assistant rows mirror the image branch: the
-                // placeholder message in the store has no real content; the
-                // live attachment lives in `pdfAttachments`. If we don't
-                // have it (cold relaunch before the render completed), the
-                // bubble surfaces the same "no longer available" recovery.
-                if message.role == "assistant",
+                } else if message.role == "assistant",
                    message.id.hasPrefix(Self.pdfMessageIdPrefix) {
+                    // pdf-prefixed assistant rows mirror the image branch: the
+                    // placeholder message in the store has no real content; the
+                    // live attachment lives in `pdfAttachments`. If we don't
+                    // have it (cold relaunch before the render completed), the
+                    // bubble surfaces the same "no longer available" recovery.
                     let attachmentId = String(message.id.dropFirst(Self.pdfMessageIdPrefix.count))
                     let attachment = pdfAttachments[attachmentId]
                         ?? PDFAttachment(id: attachmentId,
@@ -934,32 +939,45 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                                                onRetry:   { [weak self] att in self?.retryPDF(attachment: att) })
                     pdfBubbles[attachmentId] = bubble
                     stack.addArrangedSubview(makePDFRow(bubbleView: bubble))
-                    continue
+                } else {
+                    // Going through messageStruct gives us the decoded
+                    // FileAttachment (if any) without re-parsing JSON here.
+                    let m = manager.messageStruct(from: message)
+                    // Onboarding bubble: chip row hangs off the assistant prompt.
+                    // The card itself isn't persisted (the kind enum has
+                    // associated values that don't round-trip through the store),
+                    // so the live card lives in `onboardingCards` keyed by id.
+                    if message.role == "assistant",
+                       let card = onboardingCards[message.id] {
+                        stack.addArrangedSubview(
+                            MacOnboardingChipBubble.makeBubble(text: message.content,
+                                                              card: card,
+                                                              delegate: self))
+                    } else if let attachment = m.fileAttachment {
+                        stack.addArrangedSubview(makeAttachmentBubble(attachment: attachment,
+                                                                       text: m.content,
+                                                                       role: message.role))
+                    } else if let mapAttachment = m.mapAttachment {
+                        stack.addArrangedSubview(makeMapRow(bubbleView: MapBubbleView(attachment: mapAttachment)))
+                    } else {
+                        stack.addArrangedSubview(makeBubble(role: message.role, text: message.content, model: m.role == "assistant" ? m.model : nil))
+                    }
                 }
 
-                // Going through messageStruct gives us the decoded
-                // FileAttachment (if any) without re-parsing JSON here.
-                let m = manager.messageStruct(from: message)
-                // Onboarding bubble: chip row hangs off the assistant prompt.
-                // The card itself isn't persisted (the kind enum has
-                // associated values that don't round-trip through the store),
-                // so the live card lives in `onboardingCards` keyed by id.
-                if message.role == "assistant",
-                   let card = onboardingCards[message.id] {
-                    stack.addArrangedSubview(
-                        MacOnboardingChipBubble.makeBubble(text: message.content,
-                                                          card: card,
-                                                          delegate: self))
-                    continue
-                }
-                if let attachment = m.fileAttachment {
-                    stack.addArrangedSubview(makeAttachmentBubble(attachment: attachment,
-                                                                   text: m.content,
-                                                                   role: message.role))
-                } else if let mapAttachment = m.mapAttachment {
-                    stack.addArrangedSubview(makeMapRow(bubbleView: MapBubbleView(attachment: mapAttachment)))
-                } else {
-                    stack.addArrangedSubview(makeBubble(role: message.role, text: message.content, model: m.role == "assistant" ? m.model : nil))
+                // Attach a right-click context menu to the row that was
+                // just added so the user can branch the conversation.
+                if stack.arrangedSubviews.count > viewCountBefore,
+                   let rowView = stack.arrangedSubviews.last {
+                    let menu = NSMenu()
+                    let item = NSMenuItem(title: "Branch conversation from here",
+                                          action: #selector(branchFromContextMenu(_:)),
+                                          keyEquivalent: "")
+                    item.target = self
+                    item.tag = messageIndex
+                    item.image = NSImage(systemSymbolName: "arrow.triangle.branch",
+                                         accessibilityDescription: nil)
+                    menu.addItem(item)
+                    rowView.menu = menu
                 }
             default:
                 continue
@@ -1010,6 +1028,29 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             template: attachment.template,
             conversationId: attachment.conversationId
         )
+    }
+
+    // MARK: - Branch conversation
+
+    @objc private func branchFromContextMenu(_ sender: NSMenuItem) {
+        let messageIndex = sender.tag
+        guard messageIndex >= 0, messageIndex < lastRebuiltMessages.count else { return }
+
+        let manager = SimpleConversationManager.shared
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .short)
+        let branchedConversation = manager.createConversation(title: "Branch \(timestamp)")
+
+        for i in 0...messageIndex {
+            let simpleMessage = lastRebuiltMessages[i]
+            // Skip system messages — the new conversation gets its own.
+            if simpleMessage.role == "system" { continue }
+            let msg = manager.messageStruct(from: simpleMessage)
+            manager.addMessage(msg, to: branchedConversation)
+        }
+
+        if let fresh = manager.getConversation(by: branchedConversation.id) {
+            openConversationInTab(fresh)
+        }
     }
 
     func showAndReload() {

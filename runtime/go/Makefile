@@ -1,5 +1,5 @@
 BINARY := loop-runner
-MODULE := github.com/theashbhat/LoopHarness/runtime/go
+MODULE := github.com/getathelas/LoopHarness/runtime/go
 
 .PHONY: build build-linux run test clean
 

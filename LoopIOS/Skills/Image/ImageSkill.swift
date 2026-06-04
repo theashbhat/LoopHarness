@@ -47,6 +47,7 @@ When to call:
 Rules:
 - One image per call. The tool currently supports a single image at a time; if the user asks for several variants, call it once and offer to iterate.
 - The prompt is what gets sent verbatim to the image model. Be vivid and specific (subject, composition, style, mood, lighting, color palette).
+- Pick the `aspect_ratio` that fits the subject: `square` (default) for icons/avatars/logos, `portrait` for phone wallpapers/posters/full-body shots, `landscape` for scenery/banners/desktop wallpapers. When the user names a shape ("wide", "tall", "wallpaper"), map it; otherwise default to square.
 - After the image renders, write a short conversational reply — don't repeat the prompt back at the user, just acknowledge briefly so they can keep iterating.
 """
 
@@ -62,6 +63,11 @@ Rules:
                         "prompt": [
                             "type": "string",
                             "description": "Full image prompt. Be specific: subject, composition, style, mood, lighting, color palette."
+                        ],
+                        "aspect_ratio": [
+                            "type": "string",
+                            "enum": ImageSkill.aspectTokens,
+                            "description": "Shape of the image. `square` (1:1, default), `portrait` (2:3, tall), or `landscape` (3:2, wide). Choose to fit the subject; omit for square."
                         ]
                     ],
                     "required": ["prompt"]
@@ -73,6 +79,28 @@ Rules:
     static let toolNames: Set<String> = [
         "generate_image"
     ]
+
+    // MARK: - Image size
+
+    /// Friendly aspect tokens exposed to the model in the tool schema. Kept as
+    /// an `[String]` so it drops straight into the JSON-Schema `enum`.
+    static let aspectTokens: [String] = ["square", "portrait", "landscape"]
+
+    /// Default aspect when the model omits the argument — preserves the prior
+    /// always-square behavior.
+    static let defaultAspect = "square"
+
+    /// Maps a friendly aspect token to the API `size` string the image
+    /// endpoint expects. Single source of truth: if the model's accepted sizes
+    /// change, edit here only. Unknown/nil tokens fall back to square so a
+    /// bad argument can never break a generation.
+    static func apiSize(forAspect aspect: String?) -> String {
+        switch aspect?.lowercased() {
+        case "portrait":  return "1024x1536"
+        case "landscape": return "1536x1024"
+        default:          return "1024x1024" // square + fallback
+        }
+    }
 
     func handles(functionName: String) -> Bool {
         return ImageSkill.toolNames.contains(functionName)
@@ -107,7 +135,8 @@ Rules:
                 ))
                 return
             }
-            generateImage(prompt: prompt, completion: completion)
+            let aspect = (functionCall.arguments["aspect_ratio"] as? String) ?? ImageSkill.defaultAspect
+            generateImage(prompt: prompt, aspect: aspect, completion: completion)
         default:
             completion(MessageStruct(
                 role: "assistant",
@@ -124,6 +153,7 @@ Rules:
     /// host's didFinishGenerating callback whenever the network completes —
     /// the function result here is just to unblock the chat turn.
     private func generateImage(prompt: String,
+                               aspect: String,
                                completion: @escaping (MessageStruct) -> Void) {
         // Pin this generation to whichever conversation is currently active
         // *now*, not whichever one happens to be foreground when the network
@@ -131,8 +161,10 @@ Rules:
         // image is in flight and the bubble would race into the wrong tab on
         // Mac. The service carries the id through to the host callbacks.
         let convId = SimpleConversationManager.shared.currentConversation?.id
+        let size = ImageSkill.apiSize(forAspect: aspect)
         let attachment = ImageGenerationService.shared.submit(prompt: prompt,
-                                                               conversationId: convId)
+                                                              size: size,
+                                                              conversationId: convId)
         let summary = "Image generation queued (id: \(attachment.id)). Image will appear inline in the chat shortly. Acknowledge briefly to the user; do not wait for the image."
         completion(MessageStruct(
             role: "function",

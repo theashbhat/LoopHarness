@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/registry"
+	"github.com/getathelas/LoopHarness/runtime/go/registry"
 )
 
 const maxFetchBody = 64 * 1024 // 64KB

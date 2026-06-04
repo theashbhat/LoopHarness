@@ -48,9 +48,13 @@
 
 import Foundation
 
-final class ConversationFileStore {
+final class ConversationFileStore: ConversationStore {
 
     static let shared = ConversationFileStore()
+
+    /// This store owns the local / iCloud backend. Conversations it creates are
+    /// stamped `"local"`.
+    let backendMarker = ConversationBackend.local.rawValue
 
     /// iCloud container declared in the entitlements + Info.plist's
     /// `NSUbiquitousContainers`.
@@ -193,7 +197,7 @@ final class ConversationFileStore {
     // The disk write is dispatched async. Notification posts run on main.
 
     func createConversation(title: String) -> SimpleConversation {
-        let conv = SimpleConversation(title: title)
+        let conv = SimpleConversation(title: title, backend: backendMarker)
         cacheLock.lock()
         cache[conv.id] = conv
         hydratedIds.insert(conv.id) // new, no disk content to wait for
@@ -207,7 +211,8 @@ final class ConversationFileStore {
                                      id: conv.id,
                                      title: conv.title,
                                      createdAt: conv.createdAt,
-                                     updatedAt: conv.updatedAt),
+                                     updatedAt: conv.updatedAt,
+                                     backend: conv.backend),
                             to: self.fileURL(for: conv.id))
             self.cacheLock.lock()
             self.pendingWrites.remove(conv.id)
@@ -231,7 +236,8 @@ final class ConversationFileStore {
                                      id: updated.id,
                                      title: updated.title,
                                      createdAt: updated.createdAt,
-                                     updatedAt: updated.updatedAt),
+                                     updatedAt: updated.updatedAt,
+                                     backend: updated.backend),
                             to: self.fileURL(for: updated.id))
             self.cacheLock.lock()
             self.pendingWrites.remove(updated.id)
@@ -275,10 +281,36 @@ final class ConversationFileStore {
                                      id: convSnapshot.id,
                                      title: convSnapshot.title,
                                      createdAt: convSnapshot.createdAt,
-                                     updatedAt: convSnapshot.updatedAt),
+                                     updatedAt: convSnapshot.updatedAt,
+                                     backend: convSnapshot.backend),
                             to: url)
             self.cacheLock.lock()
             self.pendingWrites.remove(id)
+            self.cacheLock.unlock()
+        }
+    }
+
+    /// Replaces a message in place (matched by id), preserving its position,
+    /// then rewrites the file. No-op if the conversation or message is absent.
+    func updateMessage(_ message: SimpleMessage, inConversation conversationId: String) {
+        cacheLock.lock()
+        guard var conv = cache[conversationId],
+              let idx = conv.messages.firstIndex(where: { $0.id == message.id }) else {
+            cacheLock.unlock(); return
+        }
+        conv.messages[idx] = message
+        conv.updatedAt = Date()
+        cache[conversationId] = conv
+        pendingWrites.insert(conversationId)
+        recomputeOrderedIdsLocked()
+        cacheLock.unlock()
+        let snapshot = conv
+        postChangeNotification()
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.rewriteFile(for: snapshot)
+            self.cacheLock.lock()
+            self.pendingWrites.remove(conversationId)
             self.cacheLock.unlock()
         }
     }
@@ -394,7 +426,8 @@ final class ConversationFileStore {
             title: meta.title,
             messages: [],
             createdAt: meta.createdAt,
-            updatedAt: meta.updatedAt
+            updatedAt: meta.updatedAt,
+            backend: meta.backend
         )
     }
 
@@ -496,6 +529,7 @@ final class ConversationFileStore {
         var title = "Untitled"
         var createdAt = Date()
         var updatedAt = Date()
+        var backend: String? = nil
         var foundMeta = false
         var messages: [SimpleMessage] = []
 
@@ -511,6 +545,7 @@ final class ConversationFileStore {
                         title = meta.title
                         createdAt = meta.createdAt
                         updatedAt = meta.updatedAt
+                        backend = meta.backend
                         foundMeta = true
                     }
                 case "msg":
@@ -527,7 +562,7 @@ final class ConversationFileStore {
         messages.sort { $0.createdAt < $1.createdAt }
         return SimpleConversation(
             id: fallbackId, title: title, messages: messages,
-            createdAt: createdAt, updatedAt: updatedAt
+            createdAt: createdAt, updatedAt: updatedAt, backend: backend
         )
     }
 
@@ -676,7 +711,8 @@ final class ConversationFileStore {
             _type: "meta", id: conversation.id,
             title: conversation.title,
             createdAt: conversation.createdAt,
-            updatedAt: conversation.updatedAt
+            updatedAt: conversation.updatedAt,
+            backend: conversation.backend
         )) {
             body.append(metaData); body.append(0x0A)
         }
@@ -782,13 +818,16 @@ private struct MetaLine: Codable {
     let title: String
     let createdAt: Date
     let updatedAt: Date
+    /// Execution backend marker. Optional so meta lines written before this
+    /// field existed decode cleanly (and are treated as local on read).
+    var backend: String? = nil
 }
 
 private struct MessageLineEnvelope: Encodable {
     let message: SimpleMessage
 
     private enum CodingKeys: String, CodingKey {
-        case _type, id, role, content, name, functionName, functionArguments, actions, fileAttachment, createdAt
+        case _type, id, role, content, name, functionName, functionArguments, actions, fileAttachment, imageAttachment, createdAt
     }
 
     func encode(to encoder: Encoder) throws {
@@ -802,6 +841,7 @@ private struct MessageLineEnvelope: Encodable {
         try c.encodeIfPresent(message.functionArguments, forKey: .functionArguments)
         try c.encodeIfPresent(message.actions, forKey: .actions)
         try c.encodeIfPresent(message.fileAttachment, forKey: .fileAttachment)
+        try c.encodeIfPresent(message.imageAttachment, forKey: .imageAttachment)
         try c.encode(message.createdAt, forKey: .createdAt)
     }
 }

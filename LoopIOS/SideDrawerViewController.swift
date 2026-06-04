@@ -85,39 +85,75 @@ class SideDrawerViewController: UIViewController {
         }
     }
 
+    // MARK: - Async load state
+
+    /// Loading state for the Files/Skills tabs when they're sourced from a
+    /// remote VM over SSH (the local workspace is read synchronously and never
+    /// needs this). Drives a spinner / retry row in place of the list.
+    private enum LoadState: Equatable {
+        case idle
+        case loading
+        case loaded
+        case error(String)
+    }
+
     // MARK: - File tree state
 
-    /// Folder URLs that the user has expanded. The flat row list is rebuilt
-    /// from this set on every toggle so the order always reflects the live
-    /// directory contents.
-    private var expandedFolders: Set<URL> = []
+    /// Expanded folders, keyed by a stable string so the same set works for both
+    /// the local tree (file URL path) and a remote tree (workspace-relative
+    /// path). The flat row list is rebuilt from this set on every toggle so the
+    /// order always reflects the live directory contents.
+    private var expandedFolders: Set<String> = []
     private var fileRows: [FileRow] = []
+    /// Remote-folder listings in flight (keyed by relative path) so we don't
+    /// issue duplicate SSH listings while one is pending.
+    private var pendingRemoteListings: Set<String> = []
+    private var fileLoadState: LoadState = .idle
 
     /// One row in the flattened file tree. `depth` drives the visual indent.
+    /// The source is either an on-device file URL or a workspace-relative path
+    /// on the active remote VM.
     private struct FileRow {
-        let url: URL
+        enum Source: Equatable {
+            case local(URL)
+            case remote(relativePath: String)
+        }
+        let source: Source
+        let name: String
         let isDirectory: Bool
         let depth: Int
+
+        /// Stable key for `expandedFolders` membership.
+        var expandKey: String {
+            switch source {
+            case .local(let url):  return "local:" + url.path
+            case .remote(let rel): return "remote:" + rel
+            }
+        }
     }
 
     // MARK: - Skills state
 
     /// One row in the Skills tab. `isDynamic` distinguishes user-authored JS
-    /// skills (loaded from disk, removable) from the bundled built-ins.
+    /// skills (loaded from disk, removable) from the bundled built-ins; `remote`
+    /// is set for skills read from the active VM's `<workspace>/skills`.
     private struct SkillRow {
         let title: String
         let subtitle: String
         let isDynamic: Bool
         /// OpenAI-style function schemas this skill exposes. Bundled built-ins
-        /// carry their catalog `tools`; dynamic skills carry a single
+        /// carry their catalog `tools`; dynamic/remote skills carry a single
         /// synthesized schema from their manifest. The detail sheet renders
         /// each tool's parameters with descriptions.
         let tools: [[String: Any]]
-        /// Present only for user-authored skills — carries the source and
-        /// on-disk metadata for the detail sheet. nil for bundled built-ins.
+        /// Present only for user-authored local skills — carries the source and
+        /// on-disk metadata for the detail sheet. nil otherwise.
         let dynamic: DynamicSkillRegistry.LoadedSkill?
+        /// Present only for skills read from the active remote VM.
+        let remote: RemoteSkill?
     }
     private var skillRows: [SkillRow] = []
+    private var skillLoadState: LoadState = .idle
 
     /// Holds the URL we're previewing so QLPreviewController can ask for it
     /// via the data source protocol (which can't capture state in a closure).
@@ -272,6 +308,9 @@ class SideDrawerViewController: UIViewController {
         tableView.register(ConversationCell.self, forCellReuseIdentifier: "ConversationCell")
         tableView.register(FileTreeCell.self, forCellReuseIdentifier: "FileTreeCell")
         tableView.register(SkillCell.self, forCellReuseIdentifier: "SkillCell")
+        // Single-row placeholder for the Files/Skills tabs while a remote VM
+        // listing is loading or after it failed (spinner / retry).
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "StatusCell")
         tableView.separatorStyle = .none
         tableView.backgroundColor = .clear
         tableView.translatesAutoresizingMaskIntoConstraints = false
@@ -345,11 +384,33 @@ class SideDrawerViewController: UIViewController {
                        name: .devinAgentsDidChange, object: nil)
         nc.addObserver(self, selector: #selector(handleConversationsChanged),
                        name: .cursorAgentsDidChange, object: nil)
+        // Joining / leaving / switching an execution backend swaps the source
+        // for all three tabs (the active VM's sessions, files, and skills, or
+        // the on-device ones), so refresh whatever's on screen.
+        nc.addObserver(self, selector: #selector(handleBackendChanged),
+                       name: ExecutionBackendStore.didChangeNotification, object: nil)
     }
 
     @objc private func handleConversationsChanged() {
         guard mode == .conversations else { return }
         loadConversations()
+    }
+
+    /// The active execution backend changed. The expanded-folder set and any
+    /// cached remote skills refer to the *previous* backend's namespace, so drop
+    /// them and rebuild the current tab from the now-active source.
+    @objc private func handleBackendChanged() {
+        expandedFolders.removeAll()
+        pendingRemoteListings.removeAll()
+        fileRows = []
+        skillRows = []
+        fileLoadState = .idle
+        skillLoadState = .idle
+        switch mode {
+        case .conversations: loadConversations()
+        case .files:         rebuildFileRows(); tableView.reloadData()
+        case .skills:        rebuildSkillRows(); tableView.reloadData()
+        }
     }
 
     private func loadConversations() {
@@ -569,9 +630,16 @@ class SideDrawerViewController: UIViewController {
     /// the dynamic registry to reload first so skills authored this session
     /// show up without an app relaunch.
     private func rebuildSkillRows() {
+        // Joined to a VM: skills come from (and run on) the VM, so show only the
+        // VM's skills — the device's bundled catalog isn't what executes there.
+        if let store = RemoteWorkspaceStores.shared.activeSkillStore {
+            rebuildRemoteSkillRows(store)
+            return
+        }
+        skillLoadState = .idle
         var rows: [SkillRow] = AgentHarness.bundledSkillCatalog.map {
             SkillRow(title: $0.name, subtitle: $0.summary, isDynamic: false,
-                     tools: $0.tools, dynamic: nil)
+                     tools: $0.tools, dynamic: nil, remote: nil)
         }
         DynamicSkillRegistry.shared.reload()
         let dynamic = DynamicSkillRegistry.shared.skills.values
@@ -589,10 +657,37 @@ class SideDrawerViewController: UIViewController {
                     ],
                 ]
                 return SkillRow(title: skill.name, subtitle: skill.description,
-                                isDynamic: true, tools: [schema], dynamic: skill)
+                                isDynamic: true, tools: [schema], dynamic: skill, remote: nil)
             }
         rows.append(contentsOf: dynamic)
         skillRows = rows
+    }
+
+    /// Build the Skills rows from the active VM's `<workspace>/skills`. The list
+    /// is fetched over SSH on first access; `skillLoadState` drives a spinner /
+    /// retry row until it lands.
+    private func rebuildRemoteSkillRows(_ store: OpenClawSkillStore) {
+        skillRows = skillRows.filter { $0.remote != nil } // keep last good remote rows during reload
+        if skillLoadState == .loading { return }
+        skillLoadState = .loading
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            do {
+                let skills = try await store.listSkills()
+                // A backend switch mid-fetch invalidates this result.
+                guard RemoteWorkspaceStores.shared.activeSkillStore === store else { return }
+                self.skillRows = skills.map { skill in
+                    SkillRow(title: skill.name, subtitle: skill.description,
+                             isDynamic: true, tools: [], dynamic: nil, remote: skill)
+                }
+                self.skillLoadState = .loaded
+                if self.mode == .skills { self.tableView.reloadData() }
+            } catch {
+                guard RemoteWorkspaceStores.shared.activeSkillStore === store else { return }
+                self.skillLoadState = .error(error.localizedDescription)
+                if self.mode == .skills { self.tableView.reloadData() }
+            }
+        }
     }
 
     // MARK: - File tree
@@ -601,6 +696,12 @@ class SideDrawerViewController: UIViewController {
     /// expanded. Cheap enough for hundreds of files; if it ever needs to scale
     /// past that we can cache per-folder listings keyed by URL.
     private func rebuildFileRows() {
+        // Joined to a VM: browse the VM workspace over SSH instead of on-device.
+        if let store = RemoteWorkspaceStores.shared.activeFileStore {
+            rebuildRemoteFileRows(store)
+            return
+        }
+        fileLoadState = .idle
         fileRows = []
         appendFileRows(in: Workspace.shared.rootURL, depth: 0)
     }
@@ -622,9 +723,60 @@ class SideDrawerViewController: UIViewController {
         }
         for url in sorted {
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            fileRows.append(FileRow(url: url, isDirectory: isDir, depth: depth))
-            if isDir, expandedFolders.contains(url) {
+            let row = FileRow(source: .local(url), name: url.lastPathComponent,
+                              isDirectory: isDir, depth: depth)
+            fileRows.append(row)
+            if isDir, expandedFolders.contains(row.expandKey) {
                 appendFileRows(in: url, depth: depth + 1)
+            }
+        }
+    }
+
+    // MARK: Remote file tree
+
+    /// Build the flat row list for the active VM workspace from cached SSH
+    /// listings, kicking off a fetch for any folder (root + expanded) not yet
+    /// cached. Re-runs when each fetch lands.
+    private func rebuildRemoteFileRows(_ store: OpenClawFileStore) {
+        fileRows = []
+        appendRemoteFileRows(store, relPath: "", depth: 0)
+        // The root listing decides the spinner/error/empty state.
+        if store.cachedListing("") != nil { fileLoadState = .loaded }
+    }
+
+    private func appendRemoteFileRows(_ store: OpenClawFileStore, relPath: String, depth: Int) {
+        guard let entries = store.cachedListing(relPath) else {
+            fetchRemoteListing(store, relPath: relPath, isRoot: depth == 0)
+            return
+        }
+        for entry in entries {
+            let row = FileRow(source: .remote(relativePath: entry.relativePath),
+                              name: entry.name, isDirectory: entry.isDirectory, depth: depth)
+            fileRows.append(row)
+            if entry.isDirectory, expandedFolders.contains(row.expandKey) {
+                appendRemoteFileRows(store, relPath: entry.relativePath, depth: depth + 1)
+            }
+        }
+    }
+
+    private func fetchRemoteListing(_ store: OpenClawFileStore, relPath: String, isRoot: Bool) {
+        guard !pendingRemoteListings.contains(relPath) else { return }
+        pendingRemoteListings.insert(relPath)
+        if isRoot && store.cachedListing("") == nil { fileLoadState = .loading }
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            defer { self.pendingRemoteListings.remove(relPath) }
+            do {
+                _ = try await store.list(relPath)
+                guard RemoteWorkspaceStores.shared.activeFileStore === store else { return }
+                if self.mode == .files {
+                    self.rebuildFileRows()
+                    self.tableView.reloadData()
+                }
+            } catch {
+                guard RemoteWorkspaceStores.shared.activeFileStore === store else { return }
+                if isRoot { self.fileLoadState = .error(error.localizedDescription) }
+                if self.mode == .files { self.tableView.reloadData() }
             }
         }
     }
@@ -755,11 +907,20 @@ class SideDrawerViewController: UIViewController {
 
 extension SideDrawerViewController: UITableViewDataSource, UITableViewDelegate {
 
+    /// True when the Files tab is remote and has nothing to show yet — the
+    /// single status row (spinner / retry) stands in for the list.
+    private var filesShowStatusRow: Bool {
+        RemoteWorkspaceStores.shared.activeFileStore != nil && fileRows.isEmpty
+    }
+    private var skillsShowStatusRow: Bool {
+        RemoteWorkspaceStores.shared.activeSkillStore != nil && skillRows.isEmpty
+    }
+
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch mode {
         case .conversations: return conversations.count
-        case .files:         return fileRows.count
-        case .skills:        return skillRows.count
+        case .files:         return filesShowStatusRow ? 1 : fileRows.count
+        case .skills:        return skillsShowStatusRow ? 1 : skillRows.count
         }
     }
 
@@ -772,19 +933,47 @@ extension SideDrawerViewController: UITableViewDataSource, UITableViewDelegate {
             cell.configure(with: conversation, isCurrent: isCurrent)
             return cell
         case .files:
+            if filesShowStatusRow { return statusCell(for: fileLoadState, in: tableView, indexPath: indexPath) }
             let cell = tableView.dequeueReusableCell(withIdentifier: "FileTreeCell", for: indexPath) as! FileTreeCell
             let row = fileRows[indexPath.row]
-            cell.configure(with: row.url,
+            cell.configure(name: row.name,
                            isDirectory: row.isDirectory,
                            depth: row.depth,
-                           isExpanded: expandedFolders.contains(row.url))
+                           isExpanded: expandedFolders.contains(row.expandKey))
             return cell
         case .skills:
+            if skillsShowStatusRow { return statusCell(for: skillLoadState, in: tableView, indexPath: indexPath) }
             let cell = tableView.dequeueReusableCell(withIdentifier: "SkillCell", for: indexPath) as! SkillCell
             let row = skillRows[indexPath.row]
             cell.configure(title: row.title, subtitle: row.subtitle, isDynamic: row.isDynamic)
             return cell
         }
+    }
+
+    /// Builds the spinner / message / retry row shown in place of an empty
+    /// remote Files or Skills list.
+    private func statusCell(for state: LoadState, in tableView: UITableView, indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "StatusCell", for: indexPath)
+        cell.backgroundColor = .clear
+        cell.selectionStyle = .none
+        cell.accessoryView = nil
+        var config = cell.defaultContentConfiguration()
+        config.textProperties.color = .secondaryLabel
+        config.textProperties.numberOfLines = 0
+        switch state {
+        case .idle, .loading:
+            config.text = "Loading from the VM…"
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.startAnimating()
+            cell.accessoryView = spinner
+        case .loaded:
+            config.text = "Nothing here yet."
+        case .error(let message):
+            config.text = "Couldn't reach the VM. Tap to retry.\n\(message)"
+            config.textProperties.color = .systemRed
+        }
+        cell.contentConfiguration = config
+        return cell
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -795,35 +984,108 @@ extension SideDrawerViewController: UITableViewDataSource, UITableViewDelegate {
             delegate?.sideDrawerDidSelectConversation(conversation)
             closeDrawer()
         case .files:
+            if filesShowStatusRow {
+                if case .error = fileLoadState { fileLoadState = .idle; rebuildFileRows(); tableView.reloadData() }
+                return
+            }
             let row = fileRows[indexPath.row]
             if row.isDirectory {
-                if expandedFolders.contains(row.url) {
-                    expandedFolders.remove(row.url)
+                if expandedFolders.contains(row.expandKey) {
+                    expandedFolders.remove(row.expandKey)
                 } else {
-                    expandedFolders.insert(row.url)
+                    expandedFolders.insert(row.expandKey)
                 }
                 rebuildFileRows()
                 tableView.reloadData()
             } else {
-                presentPreview(for: row.url)
+                openFileRow(row)
             }
         case .skills:
+            if skillsShowStatusRow {
+                if case .error = skillLoadState { skillLoadState = .idle; rebuildSkillRows(); tableView.reloadData() }
+                return
+            }
             let row = skillRows[indexPath.row]
             presentSkillDetail(for: row)
         }
     }
 
+    /// Open a file row — local files preview/edit as before; remote files load
+    /// over SSH (markdown into the editor, everything else into QuickLook).
+    private func openFileRow(_ row: FileRow) {
+        switch row.source {
+        case .local(let url):
+            presentPreview(for: url)
+        case .remote(let rel):
+            presentRemoteFile(relativePath: rel, name: row.name)
+        }
+    }
+
+    /// Markdown remote files open in the editor (read + edit over SSH); any
+    /// other type is fetched to a temp file and shown read-only in QuickLook.
+    private func presentRemoteFile(relativePath rel: String, name: String) {
+        guard let store = RemoteWorkspaceStores.shared.activeFileStore else { return }
+        let presenter = topMostPresenter() ?? self
+        if MarkdownEditorViewController.isMarkdownFile(name: name) {
+            let source = MarkdownEditorViewController.Source.remote(
+                name: name,
+                load: { String(decoding: try await store.read(rel), as: UTF8.self) },
+                save: { try await store.write(Data($0.utf8), to: rel) })
+            MarkdownEditorViewController.present(source: source, from: presenter)
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            do {
+                let data = try await store.read(rel)
+                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+                try data.write(to: tmp, options: .atomic)
+                self.previewURL = tmp
+                let preview = QLPreviewController()
+                preview.dataSource = self
+                preview.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                    barButtonSystemItem: .close, target: self, action: #selector(self.dismissPreviewController))
+                let nav = UINavigationController(rootViewController: preview)
+                nav.modalPresentationStyle = .fullScreen
+                (self.topMostPresenter() ?? self).present(nav, animated: true)
+            } catch {
+                self.presentRemoteError(error)
+            }
+        }
+    }
+
+    private func presentRemoteError(_ error: Error) {
+        let alert = UIAlertController(title: "Couldn't open file",
+                                      message: error.localizedDescription, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        (topMostPresenter() ?? self).present(alert, animated: true)
+    }
+
     /// Present a skill's details in a sheet-modal. Built-ins show their name +
     /// summary; user-authored skills additionally surface their parameter
-    /// schema, source, and on-disk metadata.
+    /// schema, source, and on-disk metadata. Remote (VM) skills open an action
+    /// sheet to view, edit `skill.js` / `skill.json`, or delete over SSH.
     private func presentSkillDetail(for row: SkillRow) {
-        let detail = SkillDetailViewController(
-            title: row.title,
-            summary: row.subtitle,
-            isDynamic: row.isDynamic,
-            tools: row.tools,
-            dynamic: row.dynamic
-        )
+        let detail: SkillDetailViewController
+        if let remote = row.remote {
+            // Remote VM skills: same descriptive modal as local skills, showing
+            // the SKILL.md instructions, with Edit / Delete acting on the VM.
+            detail = SkillDetailViewController(
+                remoteName: remote.name,
+                description: remote.description,
+                markdown: remote.markdown,
+                onEdit: { [weak self] in self?.editRemoteSkillMarkdown(remote) },
+                onDelete: { [weak self] in self?.confirmDeleteRemoteSkill(remote) }
+            )
+        } else {
+            detail = SkillDetailViewController(
+                title: row.title,
+                summary: row.subtitle,
+                isDynamic: row.isDynamic,
+                tools: row.tools,
+                dynamic: row.dynamic
+            )
+        }
         let nav = UINavigationController(rootViewController: detail)
         if let sheet = nav.sheetPresentationController {
             sheet.detents = [.medium(), .large()]
@@ -834,11 +1096,52 @@ extension SideDrawerViewController: UITableViewDataSource, UITableViewDelegate {
         presenter.present(nav, animated: true)
     }
 
+    private func editRemoteSkillMarkdown(_ skill: RemoteSkill) {
+        guard let store = RemoteWorkspaceStores.shared.activeFileStore else { return }
+        let rel = skill.markdownRelPath
+        let source = MarkdownEditorViewController.Source.remote(
+            name: "\(skill.name)/\((rel as NSString).lastPathComponent)",
+            load: { String(decoding: try await store.read(rel), as: UTF8.self) },
+            save: { try await store.write(Data($0.utf8), to: rel) })
+        MarkdownEditorViewController.present(source: source, from: topMostPresenter() ?? self)
+    }
+
+    private func confirmDeleteRemoteSkill(_ skill: RemoteSkill) {
+        let presenter = topMostPresenter() ?? self
+        let alert = UIAlertController(title: "Delete \(skill.name)?",
+            message: "This removes the skill folder from the VM. This can't be undone.",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
+            guard let self = self, let store = RemoteWorkspaceStores.shared.activeSkillStore else { return }
+            Task { @MainActor in
+                do {
+                    try await store.deleteSkill(folderRelPath: skill.folderRelPath)
+                    self.skillLoadState = .idle
+                    self.rebuildSkillRows()
+                    self.tableView.reloadData()
+                } catch {
+                    self.presentRemoteError(error)
+                }
+            }
+        })
+        presenter.present(alert, animated: true)
+    }
+
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         switch mode {
         case .conversations: return 80
-        case .files:         return 44
-        case .skills:        return 60
+        case .files:         return filesShowStatusRow ? UITableView.automaticDimension : 44
+        case .skills:        return skillsShowStatusRow ? UITableView.automaticDimension : 60
+        }
+    }
+
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        // Only the status row uses self-sizing; everything else is fixed.
+        switch mode {
+        case .conversations: return 80
+        case .files:         return filesShowStatusRow ? 88 : 44
+        case .skills:        return skillsShowStatusRow ? 88 : 60
         }
     }
 
@@ -937,8 +1240,8 @@ private final class FileTreeCell: UITableViewCell {
         ])
     }
 
-    func configure(with url: URL, isDirectory: Bool, depth: Int, isExpanded: Bool) {
-        nameLabel.text = url.lastPathComponent
+    func configure(name: String, isDirectory: Bool, depth: Int, isExpanded: Bool) {
+        nameLabel.text = name
         leadingConstraint.constant = Self.baseLeading + CGFloat(depth) * Self.indentPerDepth
         if isDirectory {
             iconView.image = UIImage(systemName: isExpanded ? "folder.fill" : "folder")
@@ -1036,6 +1339,13 @@ final class SkillDetailViewController: UIViewController {
     private let tools: [[String: Any]]
     private let dynamic: DynamicSkillRegistry.LoadedSkill?
 
+    // Remote (VM SKILL.md) skills: there's no JSON tool schema or JS source —
+    // instead a markdown instructions body, plus edit/delete affordances.
+    private let isRemote: Bool
+    private let markdownBody: String?
+    private let onEdit: (() -> Void)?
+    private let onDelete: (() -> Void)?
+
     init(title: String,
          summary: String,
          isDynamic: Bool,
@@ -1046,6 +1356,30 @@ final class SkillDetailViewController: UIViewController {
         self.isDynamic = isDynamic
         self.tools = tools
         self.dynamic = dynamic
+        self.isRemote = false
+        self.markdownBody = nil
+        self.onEdit = nil
+        self.onDelete = nil
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    /// Detail modal for a skill that lives on a remote VM (Claude Code SKILL.md
+    /// format). Shows the description and the SKILL.md instructions, with Edit /
+    /// Delete actions that operate on the VM.
+    init(remoteName: String,
+         description: String,
+         markdown: String,
+         onEdit: @escaping () -> Void,
+         onDelete: @escaping () -> Void) {
+        self.skillTitle = remoteName
+        self.summary = description
+        self.isDynamic = false
+        self.tools = []
+        self.dynamic = nil
+        self.isRemote = true
+        self.markdownBody = markdown
+        self.onEdit = onEdit
+        self.onDelete = onDelete
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1062,11 +1396,28 @@ final class SkillDetailViewController: UIViewController {
             target: self,
             action: #selector(close)
         )
+        // Remote skills can be edited (SKILL.md) on the VM straight from here.
+        if onEdit != nil {
+            navigationItem.leftBarButtonItem = UIBarButtonItem(
+                barButtonSystemItem: .edit, target: self, action: #selector(editTapped))
+        }
         buildContent()
     }
 
     @objc private func close() {
         dismiss(animated: true)
+    }
+
+    @objc private func editTapped() {
+        // Dismiss the detail first, then hand off to the editor so it presents
+        // from the drawer's presenter rather than stacking on this sheet.
+        let edit = onEdit
+        dismiss(animated: true) { edit?() }
+    }
+
+    @objc private func deleteTapped() {
+        let del = onDelete
+        dismiss(animated: true) { del?() }
     }
 
     // MARK: - Layout
@@ -1128,13 +1479,60 @@ final class SkillDetailViewController: UIViewController {
                                                      body: makeBodyLabel(meta)))
             }
         }
+
+        // Remote (SKILL.md) skills: show the markdown instructions body and a
+        // destructive delete button.
+        if isRemote, let markdown = markdownBody {
+            let body = Self.bodyAfterFrontmatter(markdown)
+            if !body.isEmpty {
+                stack.addArrangedSubview(makeSection(title: "Instructions",
+                                                     body: makeCodeView(body)))
+            }
+            if onDelete != nil {
+                let delete = UIButton(type: .system)
+                delete.setTitle("Delete skill", for: .normal)
+                delete.setTitleColor(.systemRed, for: .normal)
+                delete.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+                delete.contentHorizontalAlignment = .leading
+                delete.addTarget(self, action: #selector(deleteTapped), for: .touchUpInside)
+                stack.addArrangedSubview(delete)
+            }
+        }
+    }
+
+    /// Strip a leading `---`-delimited YAML frontmatter block, returning just the
+    /// markdown instructions. Falls back to the whole text if there's no block.
+    private static func bodyAfterFrontmatter(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Find the closing delimiter, then return everything after it.
+        if let closeIdx = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) {
+            return lines[(closeIdx + 1)...].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func makeHeader() -> UIView {
+        // Remote VM skills get their own glyph/tint; otherwise the local
+        // dynamic (hammer) vs built-in (puzzle piece) distinction.
+        let glyph: String
+        let tint: UIColor
+        let badgeText: String
+        if isRemote {
+            glyph = "server.rack"; tint = .systemPurple; badgeText = "VM skill"
+        } else if isDynamic {
+            glyph = "hammer.fill"; tint = .systemOrange; badgeText = "Custom skill"
+        } else {
+            glyph = "puzzlepiece.extension.fill"; tint = .systemBlue; badgeText = "Built-in"
+        }
+
         let icon = UIImageView()
         icon.contentMode = .scaleAspectFit
-        icon.image = UIImage(systemName: isDynamic ? "hammer.fill" : "puzzlepiece.extension.fill")
-        icon.tintColor = isDynamic ? .systemOrange : .systemBlue
+        icon.image = UIImage(systemName: glyph)
+        icon.tintColor = tint
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
@@ -1147,8 +1545,7 @@ final class SkillDetailViewController: UIViewController {
         name.font = .systemFont(ofSize: 22, weight: .bold)
         name.numberOfLines = 0
 
-        let badge = makeBadge(isDynamic ? "Custom skill" : "Built-in",
-                              tint: isDynamic ? .systemOrange : .systemBlue)
+        let badge = makeBadge(badgeText, tint: tint)
 
         let textStack = UIStackView(arrangedSubviews: [name, badge])
         textStack.axis = .vertical
@@ -1383,6 +1780,12 @@ class ConversationCell: UITableViewCell {
     private let timestampLabel = UILabel()
     private let separatorView = UIView()
 
+    /// Title + backend badge laid out horizontally so the badge collapses when
+    /// hidden (local rows look exactly as before).
+    private let titleStack = UIStackView()
+    /// Small "VM" pill shown only for OpenClaw-backed conversations.
+    private let backendBadge = PaddedLabel()
+
     /// Small colored dot indicating an active agent run for this conversation.
     private let runningDot = UIView()
     private let pulseLayer = CALayer()
@@ -1414,9 +1817,30 @@ class ConversationCell: UITableViewCell {
         titleLabel.font = UIFont.systemFont(ofSize: 16, weight: .medium)
         titleLabel.textColor = .label
         titleLabel.numberOfLines = 1
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(titleLabel)
-        
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Backend badge ("VM") — hidden for local conversations.
+        backendBadge.font = UIFont.systemFont(ofSize: 10, weight: .semibold)
+        backendBadge.textColor = .secondaryLabel
+        backendBadge.backgroundColor = UIColor.systemGray.withAlphaComponent(0.18)
+        backendBadge.textInsets = UIEdgeInsets(top: 1, left: 6, bottom: 1, right: 6)
+        backendBadge.layer.cornerRadius = 6
+        backendBadge.layer.masksToBounds = true
+        backendBadge.setContentHuggingPriority(.required, for: .horizontal)
+        backendBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        backendBadge.isHidden = true
+
+        // Title + badge in a horizontal stack so the badge collapses when
+        // hidden, leaving the local-row layout unchanged.
+        titleStack.axis = .horizontal
+        titleStack.spacing = 6
+        titleStack.alignment = .center
+        titleStack.translatesAutoresizingMaskIntoConstraints = false
+        titleStack.addArrangedSubview(titleLabel)
+        titleStack.addArrangedSubview(backendBadge)
+        contentView.addSubview(titleStack)
+
         // Setup last message label
         lastMessageLabel.font = UIFont.systemFont(ofSize: 14)
         lastMessageLabel.textColor = .secondaryLabel
@@ -1441,18 +1865,18 @@ class ConversationCell: UITableViewCell {
             runningDot.widthAnchor.constraint(equalToConstant: 8),
             runningDot.heightAnchor.constraint(equalToConstant: 8),
             runningDot.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-            runningDot.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            runningDot.centerYAnchor.constraint(equalTo: titleStack.centerYAnchor),
 
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            titleLabel.trailingAnchor.constraint(equalTo: timestampLabel.leadingAnchor, constant: -8),
-            
-            timestampLabel.topAnchor.constraint(equalTo: titleLabel.topAnchor),
+            titleStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            titleStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            titleStack.trailingAnchor.constraint(equalTo: timestampLabel.leadingAnchor, constant: -8),
+
+            timestampLabel.topAnchor.constraint(equalTo: titleStack.topAnchor),
             timestampLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             timestampLabel.widthAnchor.constraint(equalToConstant: 60),
-            
-            lastMessageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            lastMessageLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            lastMessageLabel.topAnchor.constraint(equalTo: titleStack.bottomAnchor, constant: 4),
+            lastMessageLabel.leadingAnchor.constraint(equalTo: titleStack.leadingAnchor),
             lastMessageLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             lastMessageLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
             
@@ -1471,6 +1895,14 @@ class ConversationCell: UITableViewCell {
     func configure(with conversation: Conversation, isCurrent: Bool = false) {
         titleLabel.text = conversation.title
         lastMessageLabel.text = conversation.lastMessage
+
+        // Backend badge — only remote-backed conversations carry one.
+        if conversation.backend == .remote {
+            backendBadge.text = "VM"
+            backendBadge.isHidden = false
+        } else {
+            backendBadge.isHidden = true
+        }
         
         let formatter = DateFormatter()
         formatter.dateStyle = .short
@@ -1535,6 +1967,27 @@ class ConversationCell: UITableViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         runningDot.isHidden = true
+        backendBadge.isHidden = true
         stopPulse()
+    }
+}
+
+// MARK: - PaddedLabel
+
+/// A UILabel with configurable text insets — used for the small backend pill
+/// on conversation rows so the rounded background has breathing room.
+final class PaddedLabel: UILabel {
+    var textInsets: UIEdgeInsets = .zero {
+        didSet { invalidateIntrinsicContentSize() }
+    }
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: textInsets))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let base = super.intrinsicContentSize
+        return CGSize(width: base.width + textInsets.left + textInsets.right,
+                      height: base.height + textInsets.top + textInsets.bottom)
     }
 }

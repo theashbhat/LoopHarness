@@ -50,6 +50,10 @@ struct Conversation {
     /// True when at least one agent/sub-agent/tool run is active for this
     /// conversation. Drives the running-indicator dot in the sidebar row.
     var isRunning: Bool = false
+    /// Execution backend marker — `.local` or `.openclaw`. Drives the small
+    /// backend badge on the conversation row so OpenClaw-backed chats are
+    /// distinguishable from local ones. Defaults to `.local`.
+    var backend: ConversationBackend = .local
 }
 
 struct FunctionCallStruct {
@@ -155,6 +159,11 @@ struct MessageStruct {
     /// `usage` object. `nil` for on-device Apple responses and older
     /// persisted messages.
     var tokenUsage: TokenUsage? = nil
+    /// Time-to-first-token in seconds for this assistant turn, measured by
+    /// `InferenceMetrics` on the streaming path. Rendered next to the model
+    /// name (e.g. "GPT-5.5 2.6s"). `nil` for on-device Apple responses,
+    /// non-streaming paths, and older persisted messages.
+    var ttft: TimeInterval? = nil
 
     /// Explicit init that still accepts `function:` as a singular optional —
     /// keeps existing call sites compiling now that `function` is a computed
@@ -175,7 +184,8 @@ struct MessageStruct {
          mapAttachment: MapAttachment? = nil,
          onboardingCard: OnboardingCardKind? = nil,
          reasoningContent: String? = nil,
-         tokenUsage: TokenUsage? = nil) {
+         tokenUsage: TokenUsage? = nil,
+         ttft: TimeInterval? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -198,6 +208,7 @@ struct MessageStruct {
         self.onboardingCard = onboardingCard
         self.reasoningContent = reasoningContent
         self.tokenUsage = tokenUsage
+        self.ttft = ttft
     }
 
     /// Generic JSON representation of the message. Provider-specific chat
@@ -386,8 +397,15 @@ struct PDFAttachment {
 /// Inline image attached to a chat message. Created in the .generating state
 /// when an image-generation tool call kicks off, then mutated in place to
 /// .ready (with fileURL) or .failed (with reason) when the call completes.
-struct ImageAttachment {
-    enum Status: Equatable {
+///
+/// `Codable` so it can be persisted alongside the message (see
+/// `SimpleMessage.imageAttachment`): a `.ready` image reloads from its saved
+/// PNG, and a `.generating` placeholder survives an app kill instead of
+/// vanishing. The reload path coerces a stale `.generating` to `.failed`
+/// (there's no live job after relaunch) so the bubble offers retry rather than
+/// spinning forever.
+struct ImageAttachment: Codable {
+    enum Status: String, Codable, Equatable {
         case generating
         case ready
         case failed

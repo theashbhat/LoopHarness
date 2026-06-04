@@ -1,6 +1,6 @@
 package device
 
-import "github.com/theashbhat/LoopHarness/runtime/go/registry"
+import "github.com/getathelas/LoopHarness/runtime/go/registry"
 
 // Register adds all device tool stubs to the registry.
 // These tools have no local implementation; calls are routed through the bridge.

@@ -131,6 +131,7 @@ final class LoopRunnerPoller {
         lock.lock()
         guard graceTimer == nil else { lock.unlock(); return }
         let taskId = app.beginBackgroundTask(withName: "loop.runner.grace") { [weak self] in
+            SSHTunnelManager.shared.closeAll()
             self?.endBackgroundGracePolling()
         }
         guard taskId != .invalid else { lock.unlock(); return }
@@ -142,6 +143,10 @@ final class LoopRunnerPoller {
             guard let self else { return }
             // Stop before iOS suspends us, otherwise the task is force-ended.
             if app.backgroundTimeRemaining < 8 {
+                // The SSH connection won't survive suspension; tear tunnels down
+                // so the next foreground poll rebuilds cleanly rather than reusing
+                // a dead socket.
+                SSHTunnelManager.shared.closeAll()
                 self.endBackgroundGracePolling()
                 return
             }
@@ -221,12 +226,18 @@ final class LoopRunnerPoller {
         }
     }
 
-    /// Builds the right polling transport for a runner: an SSH exec client when
-    /// the runner is bound to the configured SSH host, otherwise the direct
-    /// URLSession client. Returns nil if the shared secret or URL is missing.
-    private func makeClient(for runner: RunnerConfig) -> RunnerPolling? {
+    /// Builds the right polling transport for a runner. For an SSH-backed runner
+    /// it prefers a persistent `direct-tcpip` tunnel (native HTTP over a warm
+    /// connection — no per-poll handshake) via `SSHTunnelManager`, falling back
+    /// to the `curl`-over-SSH-exec client if the tunnel can't be established
+    /// (e.g. `AllowTcpForwarding no`). Non-SSH runners use the direct URLSession
+    /// client. Returns nil if the shared secret or URL is missing.
+    private func makeClient(for runner: RunnerConfig) async -> RunnerPolling? {
         guard let secret = RunnerStore.shared.secret(for: runner.secretRef) else { return nil }
         if let remotePort = runner.sshRemotePort {
+            if let url = await SSHTunnelManager.shared.tunneledBaseURL(remotePort: remotePort) {
+                return LoopRunnerClient(baseURL: url, sharedSecret: secret)
+            }
             return LoopRunnerSSHClient(sharedSecret: secret, remotePort: remotePort)
         }
         guard let url = URL(string: runner.baseURL) else { return nil }
@@ -234,7 +245,7 @@ final class LoopRunnerPoller {
     }
 
     private func pollRunner(_ runner: RunnerConfig) async {
-        guard let client = makeClient(for: runner) else { return }
+        guard let client = await makeClient(for: runner) else { return }
 
         // Poll turns
         do {
