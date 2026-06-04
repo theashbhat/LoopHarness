@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report security issues privately by opening a
-[GitHub security advisory](https://github.com/theashbhat/LoopHarness/security/advisories/new)
+[GitHub security advisory](https://github.com/getathelas/LoopHarness/security/advisories/new)
 on the repository (or email the maintainer) rather than filing a public issue.
 We aim to acknowledge reports within a few days.
 

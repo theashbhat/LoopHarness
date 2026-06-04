@@ -56,7 +56,7 @@ final class SettingsVC: UIViewController {
                     settings.confirmReplayOnboarding()
                 },
                 Row(title: "View Source Code", icon: "curlybraces") { _ in
-                    if let url = URL(string: "https://github.com/theashbhat/LoopHarness") {
+                    if let url = URL(string: "https://github.com/getathelas/LoopHarness") {
                         UIApplication.shared.open(url)
                     }
                 }

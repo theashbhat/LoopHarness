@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/agent"
-	"github.com/theashbhat/LoopHarness/runtime/go/bridge"
-	"github.com/theashbhat/LoopHarness/runtime/go/registry"
-	"github.com/theashbhat/LoopHarness/runtime/go/storage"
-	localtools "github.com/theashbhat/LoopHarness/runtime/go/tools/local"
-	devicetools "github.com/theashbhat/LoopHarness/runtime/go/tools/device"
+	"github.com/getathelas/LoopHarness/runtime/go/agent"
+	"github.com/getathelas/LoopHarness/runtime/go/bridge"
+	"github.com/getathelas/LoopHarness/runtime/go/registry"
+	"github.com/getathelas/LoopHarness/runtime/go/storage"
+	localtools "github.com/getathelas/LoopHarness/runtime/go/tools/local"
+	devicetools "github.com/getathelas/LoopHarness/runtime/go/tools/device"
 )
 
 var version = "0.1.0"

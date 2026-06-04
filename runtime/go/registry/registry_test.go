@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/bridge"
-	"github.com/theashbhat/LoopHarness/runtime/go/registry"
+	"github.com/getathelas/LoopHarness/runtime/go/bridge"
+	"github.com/getathelas/LoopHarness/runtime/go/registry"
 )
 
 func TestLocalRouting(t *testing.T) {

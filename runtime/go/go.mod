@@ -1,4 +1,4 @@
-module github.com/theashbhat/LoopHarness/runtime/go
+module github.com/getathelas/LoopHarness/runtime/go
 
 go 1.25.0
 

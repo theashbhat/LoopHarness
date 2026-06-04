@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/agent"
-	"github.com/theashbhat/LoopHarness/runtime/go/bridge"
-	"github.com/theashbhat/LoopHarness/runtime/go/storage"
+	"github.com/getathelas/LoopHarness/runtime/go/agent"
+	"github.com/getathelas/LoopHarness/runtime/go/bridge"
+	"github.com/getathelas/LoopHarness/runtime/go/storage"
 )
 
 func authMiddleware(secret string, next http.HandlerFunc) http.HandlerFunc {

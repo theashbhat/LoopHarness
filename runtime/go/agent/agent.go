@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/registry"
-	"github.com/theashbhat/LoopHarness/runtime/go/storage"
+	"github.com/getathelas/LoopHarness/runtime/go/registry"
+	"github.com/getathelas/LoopHarness/runtime/go/storage"
 )
 
 // Message matches the OpenAI chat message format.

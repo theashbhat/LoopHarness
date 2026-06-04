@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/agent"
-	"github.com/theashbhat/LoopHarness/runtime/go/bridge"
-	"github.com/theashbhat/LoopHarness/runtime/go/registry"
-	"github.com/theashbhat/LoopHarness/runtime/go/storage"
-	localtools "github.com/theashbhat/LoopHarness/runtime/go/tools/local"
+	"github.com/getathelas/LoopHarness/runtime/go/agent"
+	"github.com/getathelas/LoopHarness/runtime/go/bridge"
+	"github.com/getathelas/LoopHarness/runtime/go/registry"
+	"github.com/getathelas/LoopHarness/runtime/go/storage"
+	localtools "github.com/getathelas/LoopHarness/runtime/go/tools/local"
 )
 
 // mockLLM returns a single tool call to echo, then a final message.

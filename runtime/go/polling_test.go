@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/theashbhat/LoopHarness/runtime/go/storage"
+	"github.com/getathelas/LoopHarness/runtime/go/storage"
 )
 
 func setupPollingTest(t *testing.T) (*storage.Store, *httptest.Server, func()) {
