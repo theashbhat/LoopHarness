@@ -805,26 +805,58 @@ final class DevinAgentService {
     }
 
     private static func completionBody(for job: DevinAgentJob) -> String {
+        // Build a short informal summary of what the agent worked on.
+        let summary = buildSummary(for: job)
+        let prLine = job.prURL.map { "\n🔗 PR: \($0)" } ?? ""
+        let dashLine = job.dashboardURL.map { "\n📂 [Open session](\($0))" } ?? ""
+
         switch job.status {
         case "finished":
-            if let pr = job.prURL {
-                return "✅ Devin finished — PR: \(pr)"
-            }
-            let where_ = job.dashboardURL.map { " View it: \($0)" } ?? ""
-            return "✅ Devin finished. No PR URL was reported yet (it may still be opening on GitHub).\(where_)"
+            return "\(summary) — all done!\(prLine)\(dashLine)"
         case "blocked":
-            let where_ = job.dashboardURL.map { " Open it: \($0)" } ?? ""
-            return "🟡 Devin is paused and waiting on input.\(where_)"
+            return "\(summary) — paused and needs your input.\(prLine)\(dashLine)"
         case "expired":
-            return "⌛ Devin session expired before it finished."
+            return "\(summary) — session timed out before finishing.\(dashLine)"
         case "cancelled":
-            return "🚫 Devin session was cancelled."
+            return "\(summary) — session was cancelled.\(dashLine)"
         case "stale":
-            let where_ = job.dashboardURL.map { " Check it: \($0)" } ?? ""
-            return "⌛️ Still waiting on Devin after a while — I've stopped tracking it here.\(where_)"
+            return "\(summary) — been a while with no progress, stopped tracking.\(prLine)\(dashLine)"
         default:
-            return "❌ Devin session ended with an error."
+            return "\(summary) — hit an error and couldn't continue.\(prLine)\(dashLine)"
         }
+    }
+
+    /// Synthesize a brief natural-language summary from the best available
+    /// data: title, last assistant message, or original task prompt.
+    private static func buildSummary(for job: DevinAgentJob) -> String {
+        // Prefer the session title if available (most descriptive).
+        let headline: String
+        if let title = job.title, !title.isEmpty {
+            headline = title
+        } else {
+            // Fall back to the first line of the task prompt, truncated.
+            let first = job.task.trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .newlines).first ?? job.task
+            headline = first.count <= 60 ? first : String(first.prefix(57)) + "…"
+        }
+
+        // Try to pull the last Devin message as extra context (what it said
+        // right before finishing). Keep it short — one sentence max.
+        let lastDevinMsg = job.messages.last(where: { $0.type == "devin" })?.message
+        let snippet: String? = lastDevinMsg.flatMap { msg in
+            let trimmed = msg.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            // Take the first sentence (up to ~120 chars) for a brief excerpt.
+            let firstSentence = trimmed.components(separatedBy: CharacterSet(charactersIn: ".!?\n")).first ?? trimmed
+            let capped = firstSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+            if capped.isEmpty { return nil }
+            return capped.count <= 120 ? capped : String(capped.prefix(117)) + "…"
+        }
+
+        if let snippet = snippet, snippet.lowercased() != headline.lowercased() {
+            return "Devin worked on **\(headline)** — \(snippet)"
+        }
+        return "Devin worked on **\(headline)**"
     }
 
     private func deliverNotificationIfNeeded(for job: DevinAgentJob) {
