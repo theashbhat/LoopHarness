@@ -313,19 +313,52 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     
     
     
+    /// Message ids whose "Used N tools" disclosure is currently expanded.
+    /// Toggled by tapping the disclosure header; consulted in `cellForRowAt`.
+    private var expandedToolMessageIds = Set<String>()
+
     var visible_messages: [MessageStruct] {
-        return self.messages.filter({
-            // System + bare function calls + raw function results are hidden,
-            // EXCEPT we keep messages carrying an image, map, or file
-            // attachment regardless of role — those are inline bubbles whose
-            // only surface is the rendered visual. share_file produces a
-            // function-role message with a fileAttachment; image / map
-            // skills do the same.
+        let filtered = self.messages.filter({
+            // System + raw function results are hidden, EXCEPT we keep
+            // messages carrying an image, map, or file attachment regardless
+            // of role — those are inline bubbles whose only surface is the
+            // rendered visual. share_file produces a function-role message
+            // with a fileAttachment; image / map skills do the same.
             if $0.imageAttachment != nil { return true }
             if $0.mapAttachment != nil { return true }
             if $0.fileAttachment != nil { return true }
-            return $0.role != "system" && $0.function == nil && $0.role != "function"
+            // Assistant turns carrying tool calls are now surfaced as a
+            // collapsible "Used N tools" disclosure, so they're kept (they
+            // used to be hidden via `function == nil`). Raw `function`-role
+            // results and system seeds stay hidden.
+            return $0.role != "system" && $0.role != "function"
         })
+        return Self.mergingAdjacentToolCalls(filtered)
+    }
+
+    /// Collapses runs of consecutive assistant tool-call turns that carry no
+    /// human-facing text into a single turn, so several back-to-back tool
+    /// calls render as one "Used N tools" disclosure instead of a stack of
+    /// "Used 1 tool" rows. Turns with prose content are left intact (their
+    /// text must render), and the merged turn keeps the first turn's id so
+    /// expand/collapse state and id-based lookups stay stable.
+    private static func mergingAdjacentToolCalls(_ messages: [MessageStruct]) -> [MessageStruct] {
+        func isTextlessToolTurn(_ m: MessageStruct) -> Bool {
+            return m.role == "assistant"
+                && !m.functions.isEmpty
+                && m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && m.imageAttachment == nil && m.mapAttachment == nil && m.fileAttachment == nil
+        }
+        var out: [MessageStruct] = []
+        for message in messages {
+            if isTextlessToolTurn(message),
+               let last = out.last, isTextlessToolTurn(last) {
+                out[out.count - 1].functions.append(contentsOf: message.functions)
+                continue
+            }
+            out.append(message)
+        }
+        return out
     }
 
     /// Messages eligible for the LLM call. Same set as `self.messages` minus
@@ -505,6 +538,17 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             object: nil
         )
 
+        // The OpenClaw background poller detected a new message in some
+        // conversation (an agent reply that landed while away, a Telegram turn,
+        // etc). Flag it unread so the hamburger dot nudges the user — unless that
+        // conversation is already on-screen.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOpenClawMessageArrived(_:)),
+            name: .openClawMessageDidArrive,
+            object: nil
+        )
+
         // Cover writers that go through iCloudKVSDefaults directly (e.g. the
         // OnboardingCoordinator's voice-step writes to `audioMuted` and
         // `ttsProvider`) — without this, picking a voice during onboarding
@@ -668,10 +712,14 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         if refreshIfRemote && conversation.backendKind == .remote {
             let convId = conversation.id
             conversationManager.refreshRemoteConversation(id: convId) { [weak self] _ in
-                guard let self = self,
-                      self.currentConversationEntity?.id == convId,
-                      let fresh = self.conversationManager.getConversation(by: convId) else { return }
-                self.loadMessagesFromConversation(fresh, refreshIfRemote: false)
+                // SSH-backed; completes off-main. loadMessagesFromConversation
+                // mutates self.messages and touches the table, so hop to main.
+                DispatchQueue.main.async {
+                    guard let self = self,
+                          self.currentConversationEntity?.id == convId,
+                          let fresh = self.conversationManager.getConversation(by: convId) else { return }
+                    self.loadMessagesFromConversation(fresh, refreshIfRemote: false)
+                }
             }
         }
     }
@@ -1013,6 +1061,10 @@ extension MessagingVC: MessageBoxDelegate {
         let context = self.contextMessages(for: reqConvId)
         self.beginStreamingTurn()
         Cloud.connection.chat(messages: context, onPartial: self.streamingPartialHandler(for: reqConvId)) { responseMessage, error in
+          // Fires off-main (URLSession delegate queue); ai_state / self.messages
+          // are read by the table on main, so all mutation runs on main to avoid
+          // racing the streaming render (see startReply for the full rationale).
+          DispatchQueue.main.async {
             if self.currentConversationEntity?.id == reqConvId {
                 self.ai_state = .None
             }
@@ -1036,13 +1088,11 @@ extension MessagingVC: MessageBoxDelegate {
                                     self.conversationManager.addMessage(responseMessage, to: target)
                                 }
                                 let viewing = self.currentConversationEntity?.id == reqConvId
-                                if viewing {
-                                    self.messages.append(responseMessage)
-                                    self.messageIdToAnimate = responseMessage.id
-                                }
 
                                 DispatchQueue.main.async {
                                     if viewing {
+                                        self.messages.append(responseMessage)
+                                        self.messageIdToAnimate = responseMessage.id
                                         self.tableView.reloadData()
                                         self.scrollToLastMessage()
                                         self.playMessageSynthesizer(message: responseMessage)
@@ -1068,17 +1118,13 @@ extension MessagingVC: MessageBoxDelegate {
                 if viewing {
                     self.messages.append(errorMessage)
                     self.messageIdToAnimate = errorMessage.id
-                }
-
-                DispatchQueue.main.async {
-                    if viewing {
-                        self.tableView.reloadData()
-                        self.scrollToLastMessage()
-                    }
+                    self.tableView.reloadData()
+                    self.scrollToLastMessage()
                 }
                 EarconPlayer.shared.play(.error)
                 VoiceLoopCoordinator.shared.setState(.idle)
             }
+          }
         }
     }
 
@@ -1151,7 +1197,13 @@ extension MessagingVC: MessageBoxDelegate {
         // on-device-only steps like context compaction).
         if conversation.backendKind == .remote {
             self.beginStreamingTurn()
-            self.startRemotePoll(conversationId: requestConversationId)
+            if OpenClawConversationStore.useGatewayWS {
+                // Warm persistent Gateway session — stream the reply into the
+                // bubble (replaces the cold CLI poll; ~4s vs ~16s).
+                self.sendRemoteGatewayTurn(text: message, conversationId: requestConversationId)
+            } else {
+                self.startRemotePoll(conversationId: requestConversationId)
+            }
             return
         }
 
@@ -1167,6 +1219,10 @@ extension MessagingVC: MessageBoxDelegate {
         let initialContext = self.chatContextMessages
         self.beginStreamingTurn()
         Cloud.connection.chat(messages: initialContext, onPartial: self.streamingPartialHandler(for: requestConversationId)) { responseMessage, error in
+          // Fires off-main (URLSession delegate queue); ai_state / self.messages
+          // are read by the table on main, so all mutation runs on main to avoid
+          // racing the streaming render (see startReply for the full rationale).
+          DispatchQueue.main.async {
             if self.currentConversationEntity?.id == requestConversationId {
                 self.ai_state = .None
             }
@@ -1204,13 +1260,11 @@ extension MessagingVC: MessageBoxDelegate {
 
                                 // Only update the in-memory table if we're still viewing that conversation
                                 let isStillViewing = self.currentConversationEntity?.id == requestConversationId
-                                if isStillViewing {
-                                    self.messages.append(responseMessage)
-                                    self.messageIdToAnimate = responseMessage.id
-                                }
 
                                 DispatchQueue.main.async {
                                     if isStillViewing {
+                                        self.messages.append(responseMessage)
+                                        self.messageIdToAnimate = responseMessage.id
                                         self.tableView.reloadData()
                                         self.scrollToLastMessage()
                                         self.playMessageSynthesizer(message: responseMessage)
@@ -1224,8 +1278,8 @@ extension MessagingVC: MessageBoxDelegate {
 
                     }
                 }
-                
-                
+
+
                 let modelName = ModelSelectionStore.current.displayName
                 let errorMessage = MessageStruct(role: "assistant", content: "Sorry – \(modelName) didn't respond. You can try again or switch models in Settings ▸ Model.")
                 ActiveRequestTracker.shared.markIdle(requestConversationId)
@@ -1239,17 +1293,13 @@ extension MessagingVC: MessageBoxDelegate {
                 if isStillViewing {
                     self.messages.append(errorMessage)
                     self.messageIdToAnimate = errorMessage.id
-                }
-
-                DispatchQueue.main.async {
-                    if isStillViewing {
-                        self.tableView.reloadData()
-                        self.scrollToLastMessage()
-                    }
+                    self.tableView.reloadData()
+                    self.scrollToLastMessage()
                 }
                 EarconPlayer.shared.play(.error)
                 VoiceLoopCoordinator.shared.setState(.idle)
             }
+          }
         }
 
 //      make api request to get response
@@ -1295,6 +1345,46 @@ extension MessagingVC: MessageBoxDelegate {
         }
     }
 
+    /// Humanized tool name for the "Used N tools" disclosure. Reuses the
+    /// skill-aware `statusText` copy, dropping the live-tense "running "
+    /// prefix so the row reads as a past-tense list entry.
+    private func toolDisplayName(for call: FunctionCallStruct) -> String {
+        let status = statusText(for: call)
+        let prefix = "running "
+        if status.hasPrefix(prefix) {
+            return String(status.dropFirst(prefix.count))
+        }
+        return status
+    }
+
+    /// Short, single-line summary of a call's most meaningful argument for the
+    /// expanded disclosure (e.g. the search query or target URL). Empty when no
+    /// useful string argument is present.
+    private func argSummary(for call: FunctionCallStruct) -> String {
+        let preferredKeys = ["query", "q", "url", "text", "prompt", "title", "name", "path", "message", "content"]
+        var value: String? = nil
+        for key in preferredKeys {
+            if let s = call.arguments[key] as? String,
+               !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                value = s
+                break
+            }
+        }
+        if value == nil {
+            value = call.arguments.values
+                .compactMap { $0 as? String }
+                .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+        guard var summary = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !summary.isEmpty else { return "" }
+        summary = summary.replacingOccurrences(of: "\n", with: " ")
+        let limit = 60
+        if summary.count > limit {
+            summary = String(summary.prefix(limit)) + "…"
+        }
+        return summary
+    }
+
     // MARK: - Live streaming
 
     /// Build the per-turn partial-text handler passed to
@@ -1337,6 +1427,20 @@ extension MessagingVC: MessageBoxDelegate {
     /// full reload (which would dump scroll position and restart animations).
     private func renderStreamingPartial() {
         guard ai_state != .None, !streamingPartial.isEmpty else { return }
+        // This render is dispatched async (appendStreamingDelta), and several
+        // code paths mutate `self.messages` synchronously but defer their
+        // `reloadData()` to a later runloop. If such a mutation has landed but
+        // its reload hasn't run yet, the table's cached row count is stale
+        // relative to the data source. An empty begin/endUpdates re-queries
+        // numberOfRowsInSection, sees the count change with no insert/delete to
+        // explain it, and throws NSInternalInconsistencyException ("Invalid
+        // batch updates detected"). Detect the drift and re-sync with a full
+        // reload instead of crashing — the pending reload becomes a no-op.
+        let expectedRows = visible_messages.count + (ai_state != .None ? 1 : 0)
+        guard tableView.numberOfRows(inSection: 0) == expectedRows else {
+            tableView.reloadData()
+            return
+        }
         let ip = IndexPath(row: visible_messages.count, section: 0)
         guard let cell = tableView.cellForRow(at: ip) as? MessagingCell else { return }
         let partial = MessageStruct(role: "assistant",
@@ -1353,6 +1457,57 @@ extension MessagingVC: MessageBoxDelegate {
         }
         if nearBottom {
             tableView.scrollToRow(at: ip, at: .bottom, animated: false)
+        }
+    }
+
+    // MARK: - Remote (VM) turn — Gateway WebSocket (warm, streaming)
+
+    /// Drive a remote turn over the persistent Gateway session. Reuses the same
+    /// streaming bubble as local inference: `onDelta` feeds `streamingPartial`;
+    /// the completion finalizes by appending the persisted assistant message.
+    private func sendRemoteGatewayTurn(text: String, conversationId: String) {
+        let onPartial = streamingPartialHandler(for: conversationId)
+        conversationManager.sendRemoteStreaming(text: text, conversationId: conversationId, onDelta: onPartial) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                ActiveRequestTracker.shared.markIdle(conversationId)
+                let isViewing = self.currentConversationEntity?.id == conversationId
+                switch result {
+                case .success(let msg):
+                    guard isViewing else { self.markConversationUnread(conversationId); return }
+                    self.ai_state = .None
+                    self.streamingPartial = ""
+                    self.messages.append(msg)
+                    AgentActivityLog.shared.setAssistantTranscript(msg.content)
+                    VoiceLoopCoordinator.shared.publishAcknowledgePulse()
+                    // Speak the reply per the client's TTS settings. Mirrors the
+                    // local-inference path (see `processMessage`); the synthesizer
+                    // honors the mute toggle / provider / voice / speed internally,
+                    // and plays regardless of whether the text streamed in live.
+                    self.playMessageSynthesizer(message: msg)
+                    // Only play the type-on reveal if nothing streamed in this
+                    // turn. When deltas already rendered the text live, re-animating
+                    // would fade the whole bubble back from zero. Mirrors the
+                    // local-inference path (see `processMessage`).
+                    if !self.streamedCurrentTurn {
+                        self.messageIdToAnimate = msg.id
+                    }
+                    self.tableView.reloadData()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.scrollToLastMessage() }
+                    VoiceLoopCoordinator.shared.setState(.idle)
+                case .failure(let error):
+                    guard isViewing else { return }
+                    self.ai_state = .None
+                    self.streamingPartial = ""
+                    let notice = MessageStruct(role: "assistant",
+                        content: "⚠️ Couldn't reach the agent: \(error.localizedDescription)")
+                    self.messages.append(notice)
+                    self.messageIdToAnimate = notice.id
+                    self.tableView.reloadData()
+                    EarconPlayer.shared.play(.error)
+                    VoiceLoopCoordinator.shared.setState(.idle)
+                }
+            }
         }
     }
 
@@ -1405,15 +1560,19 @@ extension MessagingVC: MessageBoxDelegate {
             return
         }
         conversationManager.refreshRemoteConversation(id: convId) { [weak self] _ in
-            guard let self = self else { return }
-            // The poll may have been cancelled or replaced while the SSH fetch
-            // was in flight (user switched chats / sent again / changed backend).
-            guard self.remotePollConversationId == convId else { return }
-            let terminal = self.ingestNewRemoteMessages(conversationId: convId)
-            if terminal {
-                self.cancelRemotePoll()
-            } else {
-                self.scheduleRemotePollTick()
+            // SSH-backed; completes off-main. ingestNewRemoteMessages mutates
+            // ai_state / self.messages and touches the table, so hop to main.
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                // The poll may have been cancelled or replaced while the SSH fetch
+                // was in flight (user switched chats / sent again / changed backend).
+                guard self.remotePollConversationId == convId else { return }
+                let terminal = self.ingestNewRemoteMessages(conversationId: convId)
+                if terminal {
+                    self.cancelRemotePoll()
+                } else {
+                    self.scheduleRemotePollTick()
+                }
             }
         }
     }
@@ -1445,6 +1604,14 @@ extension MessagingVC: MessageBoxDelegate {
             if terminal {
                 self.ai_state = .None
                 VoiceLoopCoordinator.shared.setState(.idle)
+                // Speak the final assistant reply per the client's TTS settings,
+                // matching the local-inference and Gateway-streaming paths. The
+                // synthesizer honors the mute toggle / provider / voice / speed.
+                if let last = stored.last, last.role == "assistant" {
+                    let reply = conversationManager.messageStruct(from: last)
+                    AgentActivityLog.shared.setAssistantTranscript(reply.content)
+                    self.playMessageSynthesizer(message: reply)
+                }
             }
             self.streamingPartial = ""
             self.tableView.reloadData()
@@ -1562,7 +1729,17 @@ extension MessagingVC: MessageBoxDelegate {
             return
         }
 
-        // Assistant emitted ≥1 tool call(s).
+        // Assistant emitted ≥1 tool call(s). Persist the turn so its
+        // "Used N tools" disclosure survives a reload — previously this turn
+        // lived only in-memory and vanished when the conversation reloaded.
+        let toolConversation: SimpleConversation
+        if let id = targetConvId, let target = conversationManager.getConversation(by: id) {
+            toolConversation = target
+        } else {
+            toolConversation = ensureCurrentConversation()
+        }
+        conversationManager.addMessage(message, to: toolConversation)
+
         if isViewing {
             if let firstCall = message.functions.first {
                 self.ai_state = .Thinking(text: self.statusText(for: firstCall))
@@ -1654,23 +1831,30 @@ extension MessagingVC: MessageBoxDelegate {
         let context = self.contextMessages(for: reqConvId)
         self.beginStreamingTurn()
         Cloud.connection.chat(messages: context, onPartial: streamingPartialHandler(for: reqConvId)) { [weak self] responseMessage, error in
-            guard let self = self else { return }
-            if self.currentConversationEntity?.id == reqConvId {
-                self.ai_state = .None
-            }
-            if let responseMessage = responseMessage {
-                self.processMessage(message: responseMessage, requestConversationId: reqConvId)
-                return
-            }
-            let detail = error?.localizedDescription ?? ""
-            let body: String
-            if !detail.isEmpty && !detail.lowercased().hasPrefix("the operation couldn") {
-                body = detail
-            } else {
-                body = "Sorry – I'm having trouble connecting to the model. Please try again."
-            }
-            let errorMessage = MessageStruct(role: "assistant", content: body)
+            // Fires on URLSession's delegate queue. `ai_state` and
+            // `self.messages` are read by the table view on the main thread
+            // (numberOfRowsInSection / renderStreamingPartial), so every
+            // mutation here MUST happen on main — otherwise an off-main
+            // `ai_state = .None` can land mid-render and flip the row count
+            // between beginUpdates and endUpdates, tripping "Invalid batch
+            // updates detected".
             DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.currentConversationEntity?.id == reqConvId {
+                    self.ai_state = .None
+                }
+                if let responseMessage = responseMessage {
+                    self.processMessage(message: responseMessage, requestConversationId: reqConvId)
+                    return
+                }
+                let detail = error?.localizedDescription ?? ""
+                let body: String
+                if !detail.isEmpty && !detail.lowercased().hasPrefix("the operation couldn") {
+                    body = detail
+                } else {
+                    body = "Sorry – I'm having trouble connecting to the model. Please try again."
+                }
+                let errorMessage = MessageStruct(role: "assistant", content: body)
                 self.processMessage(message: errorMessage, requestConversationId: reqConvId)
             }
         }
@@ -2216,6 +2400,15 @@ extension MessagingVC {
         showSideDrawer()
     }
 
+    /// The OpenClaw poller surfaced a new message. Mark the owning conversation
+    /// unread unless it's the one currently on-screen (the user is already
+    /// looking at it, so the nudge would be noise).
+    @objc private func handleOpenClawMessageArrived(_ note: Notification) {
+        guard let conversationId = note.userInfo?["conversation_id"] as? String else { return }
+        if conversationManager.currentConversation?.id == conversationId { return }
+        markConversationUnread(conversationId)
+    }
+
     /// Flag a chat as having a fresh, unseen assistant response. Shows the
     /// green dot on the hamburger button. Called when a response lands in a
     /// conversation the user isn't currently viewing.
@@ -2521,6 +2714,17 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         cell.imageDelegate = self
         cell.pdfDelegate = self
         cell.onboardingDelegate = self
+        // Tool-call turns render as a collapsible "Used N tools" disclosure.
+        // Wire the toggle delegate, expanded state, and display resolver before
+        // setData, which reads them synchronously in its disclosure branch.
+        if message.role == "assistant" && !message.functions.isEmpty {
+            cell.toolDelegate = self
+            cell.toolExpanded = expandedToolMessageIds.contains(message.id)
+            cell.toolDisplayProvider = { [weak self] call in
+                guard let self = self else { return (title: call.name, subtitle: "") }
+                return (title: self.toolDisplayName(for: call), subtitle: self.argSummary(for: call))
+            }
+        }
         cell.setData(data: message, shouldAnimate: message.id == self.messageIdToAnimate)
         if message.id == self.messageIdToAnimate {
             self.messageIdToAnimate = nil
@@ -2663,6 +2867,29 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         // Switch to the branched conversation.
         if let fresh = conversationManager.getConversation(by: branchedConversation.id) {
             loadConversation(fresh)
+        }
+    }
+}
+
+// MARK: - MessagingCellToolDelegate
+
+extension MessagingVC: MessagingCellToolDelegate {
+    /// Toggle the tapped turn's "Used N tools" disclosure open/closed and
+    /// reload just that row. UITableView dispatches taps on the main thread,
+    /// honoring the VC's main-thread invariant for `messages`/table mutations.
+    func messagingCellDidTapToolDisclosure(messageId: String) {
+        if expandedToolMessageIds.contains(messageId) {
+            expandedToolMessageIds.remove(messageId)
+        } else {
+            expandedToolMessageIds.insert(messageId)
+        }
+        guard let idx = visible_messages.firstIndex(where: { $0.id == messageId }) else {
+            tableView.reloadData()
+            return
+        }
+        let ip = IndexPath(row: idx, section: 0)
+        UIView.performWithoutAnimation {
+            tableView.reloadRows(at: [ip], with: .none)
         }
     }
 }

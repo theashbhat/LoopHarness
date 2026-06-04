@@ -51,6 +51,12 @@ struct SimpleMessage: Codable {
     let name: String?
     let functionName: String?
     let functionArguments: String?
+    /// JSON-encoded array of every tool call on an assistant turn —
+    /// `[{name, arguments, callId}]`. Drives the "Used N tools" disclosure on
+    /// reload. The legacy singular `functionName`/`functionArguments` pair is
+    /// still written for back-compat; this carries the full set since a turn
+    /// can emit multiple parallel calls. Optional, so old rows decode to nil.
+    let functionCallsJSON: String?
     let actions: String?
     /// JSON-encoded `FileAttachment` (image or PDF). Nil for messages without
     /// a user-uploaded attachment. Stored as a string so it rides alongside
@@ -86,6 +92,7 @@ struct SimpleMessage: Codable {
          name: String? = nil,
          functionName: String? = nil,
          functionArguments: String? = nil,
+         functionCallsJSON: String? = nil,
          actions: String? = nil,
          fileAttachment: String? = nil,
          mapAttachment: String? = nil,
@@ -100,6 +107,7 @@ struct SimpleMessage: Codable {
         self.name = name
         self.functionName = functionName
         self.functionArguments = functionArguments
+        self.functionCallsJSON = functionCallsJSON
         self.actions = actions
         self.fileAttachment = fileAttachment
         self.mapAttachment = mapAttachment
@@ -164,6 +172,13 @@ class SimpleConversationManager {
         }
         remoteStores = next
         router.setRemotes(next)
+    }
+
+    /// The remote conversation store for a backend id, if one exists. Exposed for
+    /// the background message poller, which drives each backend's session list +
+    /// transcript reads through its store.
+    func remoteStore(for backendID: String) -> OpenClawConversationStore? {
+        remoteStores[backendID]
     }
 
     // MARK: - Current Conversation
@@ -268,12 +283,28 @@ class SimpleConversationManager {
     /// Shared by `addMessage` (createdAt = now) and `updateMessage` (createdAt
     /// = the original, to keep ordering stable on rewrite).
     private func makeSimpleMessage(from messageStruct: MessageStruct, createdAt: Date) -> SimpleMessage {
-        // Serialize function arguments
+        // Serialize function arguments (legacy singular pair — first call only).
         var functionArgumentsString: String? = nil
         if let function = messageStruct.function {
             if let data = try? JSONSerialization.data(withJSONObject: function.arguments),
                let string = String(data: data, encoding: .utf8) {
                 functionArgumentsString = string
+            }
+        }
+
+        // Serialize the full tool-call array so the "Used N tools" disclosure
+        // can be rebuilt on reload, including turns with multiple parallel
+        // calls that the singular pair above can't represent.
+        var functionCallsString: String? = nil
+        if !messageStruct.functions.isEmpty {
+            let payload: [[String: Any]] = messageStruct.functions.map { call in
+                var entry: [String: Any] = ["name": call.name, "arguments": call.arguments]
+                if let callId = call.callId { entry["callId"] = callId }
+                return entry
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let string = String(data: data, encoding: .utf8) {
+                functionCallsString = string
             }
         }
 
@@ -330,6 +361,7 @@ class SimpleConversationManager {
             name: messageStruct.name,
             functionName: messageStruct.function?.name,
             functionArguments: functionArgumentsString,
+            functionCallsJSON: functionCallsString,
             actions: actionsString,
             fileAttachment: fileAttachmentString,
             mapAttachment: mapAttachmentString,
@@ -364,6 +396,34 @@ class SimpleConversationManager {
                 self._currentConversation = refreshed
             }
             completion?(reachable)
+        }
+    }
+
+    /// Drive a remote (OpenClaw) user turn over the warm Gateway WebSocket,
+    /// streaming the reply. `onDelta` gets incremental text and `completion` the
+    /// final persisted assistant message — both on the main queue. The user
+    /// message must already be persisted (via `addMessage`). Routes to the store
+    /// that owns the conversation (falling back to the active remote backend).
+    func sendRemoteStreaming(text: String, conversationId id: String,
+                             onDelta: @escaping (String) -> Void,
+                             completion: @escaping (Result<MessageStruct, Error>) -> Void) {
+        let store = remoteStores.values.first(where: { $0.conversation(id: id) != nil })
+            ?? ExecutionBackendStore.shared.activeRemoteBackendID.flatMap { remoteStores[$0] }
+        guard let store = store else {
+            completion(.failure(OpenClawGatewayError.notConnected)); return
+        }
+        store.sendStreaming(text: text, conversationId: id, onDelta: onDelta) { [weak self] result in
+            switch result {
+            case .success(let msg):
+                if let self = self, self.currentConversation?.id == id,
+                   let refreshed = self.router.conversation(id: id) {
+                    self._currentConversation = refreshed
+                }
+                let ms = self?.messageStruct(from: msg) ?? MessageStruct(role: "assistant", content: msg.content)
+                completion(.success(ms))
+            case .failure(let e):
+                completion(.failure(e))
+            }
         }
     }
 
@@ -431,7 +491,17 @@ class SimpleConversationManager {
             messageStruct.ttft = seconds
         }
 
-        if let functionName = simpleMessage.functionName,
+        // Prefer the full tool-call array (covers multi-call turns); fall back
+        // to the legacy singular pair for rows written before that field.
+        if let callsString = simpleMessage.functionCallsJSON,
+           let callsData = callsString.data(using: .utf8),
+           let rawCalls = try? JSONSerialization.jsonObject(with: callsData) as? [[String: Any]] {
+            messageStruct.functions = rawCalls.compactMap { entry in
+                guard let name = entry["name"] as? String else { return nil }
+                let arguments = entry["arguments"] as? [String: Any] ?? [:]
+                return FunctionCallStruct(name: name, arguments: arguments, callId: entry["callId"] as? String)
+            }
+        } else if let functionName = simpleMessage.functionName,
            let argumentsString = simpleMessage.functionArguments,
            let argumentsData = argumentsString.data(using: .utf8),
            let arguments = try? JSONSerialization.jsonObject(with: argumentsData) as? [String: Any] {

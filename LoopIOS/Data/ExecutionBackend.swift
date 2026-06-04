@@ -151,6 +151,9 @@ final class ExecutionBackendStore {
         let removed = remoteBackends.remove(at: idx)
         deleteSecrets(for: removed.id)
         setValidatedFlag(false, for: removed.id)
+        #if os(iOS)
+        OpenClawMessagePoller.shared.clearState(forBackend: removed.id)
+        #endif
         if rawSelectedID == id {
             defaults.set(ExecutionBackend.localID, forKey: Self.selectionKey)
         }

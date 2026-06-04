@@ -36,6 +36,13 @@ protocol MessagingCellPDFDelegate: AnyObject {
     func messagingCellDidTapPDFRetry(attachmentId: String)
 }
 
+/// Tap-callback from the inline "Used N tools" disclosure row. Set on cells
+/// that render an assistant turn carrying tool calls so MessagingVC can toggle
+/// the row's expanded/collapsed state.
+protocol MessagingCellToolDelegate: AnyObject {
+    func messagingCellDidTapToolDisclosure(messageId: String)
+}
+
 class MessagingCell: UITableViewCell {
     let profileImageView = UIImageView()
     let textView = UITextView()
@@ -76,6 +83,23 @@ class MessagingCell: UITableViewCell {
     /// so the existing single-text-view fast path is untouched.
     let richContentStack = UIStackView()
     private var richContentConstraints: [NSLayoutConstraint] = []
+
+    // MARK: - Tool-call disclosure
+    /// Vertical container for the collapsible "Used N tools" row. Reused across
+    /// cells; its arranged subviews are rebuilt per `applyToolDisclosure` pass.
+    let toolDisclosureStack = UIStackView()
+    private var toolDisclosureConstraints: [NSLayoutConstraint] = []
+    /// Message id of the turn currently rendered as a disclosure — handed to
+    /// `toolDelegate` when the header is tapped.
+    private var toolDisclosureMessageId: String?
+    /// Set by MessagingVC before `setData` for a tool-call turn. Controls
+    /// whether the per-call body rows are shown.
+    var toolExpanded: Bool = false
+    /// Resolves a call into its display title (humanized name) + subtitle
+    /// (argument summary). Injected by MessagingVC so the cell reuses the VC's
+    /// skill-aware `statusText` humanization instead of duplicating it.
+    var toolDisplayProvider: ((FunctionCallStruct) -> (title: String, subtitle: String))?
+    weak var toolDelegate: MessagingCellToolDelegate?
 
     let actionButton = UIButton()
 
@@ -292,6 +316,12 @@ class MessagingCell: UITableViewCell {
         richContentStack.distribution = .fill
         richContentStack.spacing = 8
         richContentStack.isHidden = true
+
+        toolDisclosureStack.translatesAutoresizingMaskIntoConstraints = false
+        toolDisclosureStack.axis = .vertical
+        toolDisclosureStack.alignment = .leading
+        toolDisclosureStack.spacing = 6
+        toolDisclosureStack.isHidden = true
     }
     
     override func prepareForReuse() {
@@ -404,8 +434,23 @@ class MessagingCell: UITableViewCell {
             $0.removeFromSuperview()
         }
         richContentStack.isHidden = true
+
+        // Tool-disclosure cleanup — hide, drop subviews/constraints, and clear
+        // the injected state so a recycled cell doesn't carry over a stale
+        // delegate, expanded flag, or display provider.
+        toolDisclosureStack.isHidden = true
+        NSLayoutConstraint.deactivate(toolDisclosureConstraints)
+        toolDisclosureConstraints.removeAll()
+        toolDisclosureStack.arrangedSubviews.forEach {
+            toolDisclosureStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        toolDisclosureMessageId = nil
+        toolExpanded = false
+        toolDisplayProvider = nil
+        toolDelegate = nil
     }
-    
+
     private func clearAllConstraints() {
         // Deactivate all stored constraints
         NSLayoutConstraint.deactivate(textViewConstraints)
@@ -513,6 +558,15 @@ class MessagingCell: UITableViewCell {
         if let fileAttachment = data.fileAttachment {
             let accompanyingText = data.role == "function" ? "" : data.content
             applyFileAttachment(fileAttachment, accompanyingText: accompanyingText, role: data.role)
+            return
+        }
+
+        // Assistant turn carrying tool calls — render the collapsible
+        // "Used N tools" disclosure instead of an (often empty) text bubble.
+        // Routed before the plain-text branch since these turns usually have
+        // no human-facing prose of their own.
+        if data.role == "assistant" && !data.functions.isEmpty {
+            applyToolDisclosure(data: data)
             return
         }
 
@@ -968,6 +1022,163 @@ class MessagingCell: UITableViewCell {
         ttsIndicator.hidesWhenStopped = true
         ttsIndicator.stopAnimating()
         ttsIndicator.isHidden = true
+    }
+
+    /// Renders an assistant tool-call turn as a compact, tappable
+    /// "Used N tools" row that expands to list each call's humanized name and
+    /// a short argument summary. Mirrors `applyRichContent`'s self-contained
+    /// setup (own constraints, rebuilt subviews) so it's safe on cell reuse.
+    private func applyToolDisclosure(data: MessageStruct) {
+        profileImageView.isHidden = true
+        textView.isHidden = true
+        animatingtextView.isHidden = true
+        actionButton.isHidden = true
+        shimmerLabel.isHidden = true
+        modelLabel.isHidden = true
+
+        // Idempotent re-entry — drop any prior disclosure subviews/constraints
+        // so a reconfigured cell never stacks duplicates.
+        NSLayoutConstraint.deactivate(toolDisclosureConstraints)
+        toolDisclosureConstraints.removeAll()
+        toolDisclosureStack.arrangedSubviews.forEach {
+            toolDisclosureStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        if toolDisclosureStack.superview == nil {
+            toolDisclosureStack.translatesAutoresizingMaskIntoConstraints = false
+            self.contentView.addSubview(toolDisclosureStack)
+        }
+        toolDisclosureStack.isHidden = false
+        toolDisclosureMessageId = data.id
+
+        // Width-capped views (prose + body rows) get their bubble-width
+        // constraint activated below, after they're in the hierarchy.
+        var widthBoundedRows: [UIView] = []
+
+        // Pre-tool assistant prose, if any, sits above the disclosure.
+        let trimmed = data.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let prose = makeProseTextView(text: data.content)
+            toolDisclosureStack.addArrangedSubview(prose)
+            widthBoundedRows.append(prose)
+        }
+
+        let calls = data.functions
+
+        // Header: chevron + "Used N tool(s)". Tappable to toggle expansion.
+        toolDisclosureStack.addArrangedSubview(
+            makeToolDisclosureHeader(count: calls.count, expanded: toolExpanded))
+
+        // Body: one row per call, shown only when expanded. Each row's width is
+        // bounded to the bubble so a long argument summary wraps/truncates — but
+        // those constraints reference `contentView` and so must be activated
+        // only after the row is in the hierarchy (below), not at creation time.
+        if toolExpanded {
+            for call in calls {
+                let display = toolDisplayProvider?(call) ?? (title: call.name, subtitle: "")
+                let row = makeToolCallRow(title: display.title, subtitle: display.subtitle)
+                toolDisclosureStack.addArrangedSubview(row)
+                widthBoundedRows.append(row)
+            }
+        }
+
+        toolDisclosureConstraints = [
+            toolDisclosureStack.leadingAnchor.constraint(equalTo: self.contentView.leadingAnchor, constant: 20),
+            toolDisclosureStack.trailingAnchor.constraint(lessThanOrEqualTo: self.contentView.trailingAnchor, constant: -20),
+            toolDisclosureStack.topAnchor.constraint(equalTo: self.contentView.topAnchor, constant: 12),
+            self.contentView.bottomAnchor.constraint(greaterThanOrEqualTo: toolDisclosureStack.bottomAnchor, constant: 10),
+        ]
+        // Now that the rows are arranged subviews of the in-hierarchy stack,
+        // they share an ancestor with contentView, so the width caps are legal.
+        for row in widthBoundedRows {
+            toolDisclosureConstraints.append(
+                row.widthAnchor.constraint(lessThanOrEqualTo: self.contentView.widthAnchor, multiplier: 1.0, constant: -40))
+        }
+        NSLayoutConstraint.activate(toolDisclosureConstraints)
+    }
+
+    /// The tappable header pill: a chevron that points right (collapsed) or
+    /// down (expanded) next to "Used N tool(s)". Sized to its content so it
+    /// reads as a subtle control rather than a full-width bar.
+    private func makeToolDisclosureHeader(count: Int, expanded: Bool) -> UIView {
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.backgroundColor = .secondarySystemBackground
+        container.layer.cornerRadius = 12
+        container.isUserInteractionEnabled = true
+
+        let chevron = UIImageView(image: UIImage(systemName: expanded ? "chevron.down" : "chevron.right"))
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.tintColor = .secondaryLabel
+        chevron.contentMode = .scaleAspectFit
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "Used \(count) tool\(count == 1 ? "" : "s")"
+        label.font = UIFont.preferredFont(forTextStyle: .footnote)
+        label.textColor = .secondaryLabel
+
+        container.addSubview(chevron)
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            chevron.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            chevron.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 10),
+            chevron.heightAnchor.constraint(equalToConstant: 10),
+            label.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 7),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -7),
+        ])
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleToolDisclosureTap))
+        container.addGestureRecognizer(tap)
+        return container
+    }
+
+    /// One expanded body row: the humanized tool name (label color) followed
+    /// by its argument summary (secondary color), truncated to two lines.
+    private func makeToolCallRow(title: String, subtitle: String) -> UIView {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.numberOfLines = 2
+        label.lineBreakMode = .byTruncatingTail
+
+        let text = NSMutableAttributedString(
+            string: title,
+            attributes: [
+                .font: UIFont.preferredFont(forTextStyle: .footnote),
+                .foregroundColor: UIColor.label,
+            ])
+        if !subtitle.isEmpty {
+            text.append(NSAttributedString(
+                string: "  \(subtitle)",
+                attributes: [
+                    .font: UIFont.preferredFont(forTextStyle: .footnote),
+                    .foregroundColor: UIColor.secondaryLabel,
+                ]))
+        }
+        label.attributedText = text
+
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        // Only internal (same-hierarchy) constraints here. The bubble-width cap
+        // is added by the caller once this row is in the view tree — referencing
+        // contentView before insertion crashes ("no common ancestor").
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
+        ])
+        return container
+    }
+
+    @objc private func handleToolDisclosureTap() {
+        guard let id = toolDisclosureMessageId else { return }
+        toolDelegate?.messagingCellDidTapToolDisclosure(messageId: id)
     }
 
     /// A non-scrolling UITextView styled like the existing prose bubble.

@@ -26,12 +26,46 @@ final class SettingsVC: UIViewController {
         let rows: [Row]
     }
 
-    private let sections: [Section] = [
-        Section(header: "Core", rows: [
-            Row(title: "Execution Backend", icon: "externaldrive.badge.icloud") { settings in
-                settings.navigationController?.pushViewController(ExecutionBackendVC(), animated: true)
-            }
-        ]),
+    /// Rebuilt whenever the active execution backend changes. The "Main" section
+    /// reshapes itself for the active backend: with an OpenClaw VM active it maps
+    /// to the VM's live config (models/crons/subagents/keys) and hides the
+    /// device-only rows (Integrations, Skills, SSH); on Local it keeps the
+    /// on-device settings the app was originally designed for.
+    private var sections: [Section] = []
+
+    /// Whether a remote OpenClaw backend is currently active (configured +
+    /// validated). Drives the Settings reshaping.
+    private var isOpenClawActive: Bool {
+        ExecutionBackendStore.shared.activeRemoteBackendID != nil
+    }
+
+    private func buildSections() -> [Section] {
+        let main: Section = isOpenClawActive ? openClawMainSection() : localMainSection()
+        return [
+            Section(header: "Core", rows: [
+                Row(title: "Execution Backend", icon: "externaldrive.badge.icloud") { settings in
+                    settings.navigationController?.pushViewController(ExecutionBackendVC(), animated: true)
+                }
+            ]),
+            main,
+            // Lives in its own section so it reads as a discrete debug/utility
+            // affordance rather than something the user would tap as part of a
+            // normal settings sweep.
+            Section(header: "Help", rows: [
+                Row(title: "Replay onboarding", icon: "arrow.counterclockwise") { settings in
+                    settings.confirmReplayOnboarding()
+                },
+                Row(title: "View Source Code", icon: "curlybraces") { _ in
+                    if let url = URL(string: "https://github.com/theashbhat/LoopHarness") {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            ]),
+        ]
+    }
+
+    /// Local backend (the app's original on-device settings).
+    private func localMainSection() -> Section {
         Section(header: "Main", rows: [
             Row(title: "Model", icon: "cpu") { settings in
                 settings.navigationController?.pushViewController(ModelPickerVC(), animated: true)
@@ -50,27 +84,46 @@ final class SettingsVC: UIViewController {
             },
             Row(title: "Keys", icon: "key.fill") { settings in
                 settings.navigationController?.pushViewController(KeysVC(), animated: true)
-            }
-        ]),
-        // Lives in its own section so it reads as a discrete debug/utility
-        // affordance rather than something the user would tap as part of a
-        // normal settings sweep.
-        Section(header: "Help", rows: [
-            Row(title: "Replay onboarding", icon: "arrow.counterclockwise") { settings in
-                settings.confirmReplayOnboarding()
             },
-            Row(title: "View Source Code", icon: "curlybraces") { _ in
-                if let url = URL(string: "https://github.com/theashbhat/LoopHarness") {
-                    UIApplication.shared.open(url)
-                }
+            Row(title: "SSH", icon: "terminal") { settings in
+                settings.navigationController?.pushViewController(SSHConnectionsVC(), animated: true)
             }
-        ]),
-    ]
+        ])
+    }
+
+    /// OpenClaw VM active: rows read/write the VM's runtime config. Integrations,
+    /// Skills, and SSH are intentionally hidden for now (managed on the VM).
+    private func openClawMainSection() -> Section {
+        Section(header: "Main", rows: [
+            Row(title: "Model", icon: "cpu") { settings in
+                settings.navigationController?.pushViewController(OpenClawModelsVC(), animated: true)
+            },
+            Row(title: "Scheduled", icon: "calendar.badge.clock") { settings in
+                settings.navigationController?.pushViewController(OpenClawCronsVC(), animated: true)
+            },
+            Row(title: "Subagents", icon: "hammer") { settings in
+                settings.navigationController?.pushViewController(OpenClawSubagentsVC(), animated: true)
+            },
+            Row(title: "Keys", icon: "key.fill") { settings in
+                settings.navigationController?.pushViewController(OpenClawKeysVC(), animated: true)
+            }
+        ])
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Settings"
         view.backgroundColor = .systemGroupedBackground
+
+        sections = buildSections()
+        // Reshape Settings when the user switches execution backend (e.g. joins or
+        // leaves an OpenClaw VM) so Main reflects the now-active backend.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(backendDidChange),
+            name: ExecutionBackendStore.didChangeNotification,
+            object: nil
+        )
 
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.dataSource = self
@@ -94,6 +147,16 @@ final class SettingsVC: UIViewController {
 
     @objc private func dismissTapped() {
         dismiss(animated: true)
+    }
+
+    /// Rebuild + redraw when the active backend changes. Validation can complete
+    /// off-main, so hop to main before touching the table.
+    @objc private func backendDidChange() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.sections = self.buildSections()
+            self.tableView.reloadData()
+        }
     }
 
     /// Confirm before clearing the onboarding flags — the row sits in a normal

@@ -102,8 +102,10 @@ class MessageBox: UIView {
     private var streamingDeepgramFailed = false
 
     // MARK: - Long-press-to-record
-    /// Minimum hold duration before recording begins.
-    private static let longPressThreshold: TimeInterval = 0.6
+    /// Minimum hold duration before recording begins. Kept short so recording
+    /// feels near-instant on press; long enough to not trip on a quick tap of
+    /// the mic button (which toggles tap-to-record instead).
+    private static let longPressThreshold: TimeInterval = 0.3
     /// True while the user is holding the mic button in long-press-to-record mode.
     private(set) var isLongPressRecording = false
     /// "Release to send" pill shown above the mic button during long-press recording.

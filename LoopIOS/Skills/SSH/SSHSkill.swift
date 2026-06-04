@@ -259,6 +259,16 @@ final class SSHSkill {
         }
 
         let result: CommandResult = try await withCheckedThrowingContinuation { continuation in
+            // Four sites can resolve this continuation — output completion,
+            // createChannel failure, handshake failure, and the watchdog — and
+            // they are NOT mutually exclusive (e.g. the watchdog fires, then its
+            // channel.close() triggers channelInactive → collector.complete()).
+            // Route every resume through one single-shot gate so the second
+            // attempt is a no-op instead of crashing with "resume continuation
+            // more than once". All sites run on the single NIO event-loop
+            // thread, so a plain flag in the gate is race-free.
+            let gate = SingleResume(continuation)
+
             channel.pipeline.handler(type: NIOSSHHandler.self).whenSuccess { sshHandler in
                 sshLog.info("SSH handler ready; creating session channel")
                 let promise = channel.eventLoop.makePromise(of: Channel.self)
@@ -268,7 +278,7 @@ final class SSHSkill {
                         return childChannel.eventLoop.makeFailedFuture(SSHSkillError.unexpectedChannelType)
                     }
                     sshLog.info("session channel created; attaching exec handler")
-                    let collector = SSHOutputCollector(continuation: continuation)
+                    let collector = SSHOutputCollector(gate: gate)
                     return childChannel.pipeline.addHandlers([
                         SSHExecHandler(command: command, collector: collector)
                     ])
@@ -276,19 +286,19 @@ final class SSHSkill {
 
                 promise.futureResult.whenFailure { error in
                     sshLog.error("createChannel FAILED: \(error.localizedDescription, privacy: .public)")
-                    continuation.resume(throwing: error)
+                    gate.resume(throwing: error)
                 }
             }
 
             channel.pipeline.handler(type: NIOSSHHandler.self).whenFailure { error in
                 sshLog.error("SSH handshake FAILED: \(error.localizedDescription, privacy: .public)")
-                continuation.resume(throwing: error)
+                gate.resume(throwing: error)
             }
 
             // Timeout watchdog
             channel.eventLoop.scheduleTask(in: .seconds(Int64(timeout))) {
                 sshLog.error("watchdog fired after \(timeout, privacy: .public)s — no result; timing out")
-                continuation.resume(throwing: SSHSkillError.timeout)
+                gate.resume(throwing: SSHSkillError.timeout)
                 channel.close(promise: nil)
             }
         }
@@ -670,17 +680,40 @@ private final class SSHExecHandler: ChannelDuplexHandler {
     }
 }
 
+/// Single-shot gate around a `CheckedContinuation`. Several independent
+/// callbacks (output completion, channel/handshake failure, watchdog timeout)
+/// may try to resolve the same continuation; only the first wins, the rest are
+/// silently dropped. All callers run on the one NIO event-loop thread, so the
+/// `continuation = nil` guard needs no locking.
+private final class SingleResume {
+    private var continuation: CheckedContinuation<SSHSkill.CommandResult, Error>?
+
+    init(_ continuation: CheckedContinuation<SSHSkill.CommandResult, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: SSHSkill.CommandResult) {
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func resume(throwing error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}
+
 /// Collects output from the SSH exec channel and resolves the async
-/// continuation when complete.
+/// continuation (via the shared single-shot gate) when complete.
 private final class SSHOutputCollector {
     private var stdoutData = Data()
     private var stderrData = Data()
     private var exitCode: Int?
-    private var continuation: CheckedContinuation<SSHSkill.CommandResult, Error>?
+    private let gate: SingleResume
     private var completed = false
 
-    init(continuation: CheckedContinuation<SSHSkill.CommandResult, Error>) {
-        self.continuation = continuation
+    init(gate: SingleResume) {
+        self.gate = gate
     }
 
     func appendStdout(_ buffer: ByteBuffer) {
@@ -709,7 +742,6 @@ private final class SSHOutputCollector {
             stderr: String(data: stderrData, encoding: .utf8) ?? "",
             exitCode: exitCode ?? -1
         )
-        continuation?.resume(returning: result)
-        continuation = nil
+        gate.resume(returning: result)
     }
 }
