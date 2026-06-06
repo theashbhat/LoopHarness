@@ -65,8 +65,14 @@ final class ConversationFileStore: ConversationStore {
     private static let folderName = "messages"
 
     enum Backend { case iCloud, local }
-    let backend: Backend
-    let rootURL: URL
+    /// Resolved during `bootstrap()` on `ioQueue`, not in `init`. Defaults to
+    /// `.local` until then. All reads happen either after `_isReady` (UI) or on
+    /// `ioQueue` after the bootstrap work item (writes/hydration), so the brief
+    /// pre-resolution window is never observed with stale values.
+    private(set) var backend: Backend = .local
+    /// Implicitly-unwrapped: set by `bootstrap()` before any `ioQueue` work that
+    /// reads it (the serial queue runs bootstrap first). Never read on main.
+    private(set) var rootURL: URL!
 
     // MARK: - State (all access ordered through `cacheLock`)
 
@@ -89,6 +95,16 @@ final class ConversationFileStore: ConversationStore {
     private var inflightHydrations: Set<String> = []
     /// True while the metadata-query-triggered refresh is running.
     private var inflightRefresh: Bool = false
+    /// Flips true once `bootstrap()` has resolved the container and finished
+    /// pass-1 enumeration. Reads return an empty cache until then; UI observes
+    /// `.conversationStoreDidBecomeReady` to load the real last conversation.
+    private var _isReady: Bool = false
+
+    /// Whether pass-1 bootstrap has completed and reads reflect on-disk state.
+    var isReady: Bool {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return _isReady
+    }
 
     /// Background queue for ALL disk I/O. Reads never enter here.
     private let ioQueue = DispatchQueue(label: "loop.conversationFileStore.io",
@@ -106,6 +122,24 @@ final class ConversationFileStore: ConversationStore {
     // MARK: - Init
 
     private init() {
+        // Do NOT touch iCloud on the main thread. `forUbiquityContainerIdentifier`
+        // can block for seconds on first launch (Apple warns against calling it
+        // on main), and the pass-1 directory scan reads iCloud metadata. Because
+        // this singleton's `static let` lazy-inits synchronously on whatever
+        // thread first touches `.shared` — which is the storyboard/MessagingVC
+        // load on the main thread — doing the work here would freeze launch with
+        // a white screen. Instead defer everything to `ioQueue` (serial), so
+        // `init` returns instantly. Reads before bootstrap completes see an empty
+        // cache; `.conversationStoreDidBecomeReady` signals when real data lands.
+        ioQueue.async { [weak self] in
+            self?.bootstrap()
+        }
+    }
+
+    /// Resolve the container, run pass-1 enumeration, mark ready, then kick off
+    /// pass-2 hydration. Runs once, on `ioQueue`, as the first enqueued work item
+    /// so later write/hydration closures always see `rootURL`/`backend` set.
+    private func bootstrap() {
         let fm = FileManager.default
 
         if let ubiquity = fm.url(forUbiquityContainerIdentifier: Self.containerIdentifier) {
@@ -124,20 +158,22 @@ final class ConversationFileStore: ConversationStore {
             print("⚠️ ConversationFileStore: iCloud unavailable — local fallback at \(local.path)")
         }
 
-        // Pass 1 (synchronous, cheap): meta-only enumeration so reads have
-        // something to answer with immediately.
+        // Pass 1 (cheap): meta-only enumeration so reads have something to
+        // answer with as soon as we flip `_isReady`.
         bootstrapMetaCacheSync()
+
+        cacheLock.lock()
+        _isReady = true
+        cacheLock.unlock()
+        postReadyNotification()
+        // Wake any UI that subscribed to data changes (e.g. an open sidebar).
+        postChangeNotification()
 
         // Pass 2 (async): full hydration of every conversation's messages.
         // Files that need an iCloud download wait do it here, never on main.
-        if backend == .iCloud {
-            scheduleFullHydration()
-        } else {
-            // Local: pass 1 was cheap and already full-content for small files;
-            // but to keep semantics identical we still hydrate async so the
-            // pre/post-hydration code paths behave the same.
-            scheduleFullHydration()
-        }
+        // `scheduleFullHydration` dispatches its own `ioQueue.async`, so it runs
+        // after this bootstrap block returns — pass-1-before-pass-2 preserved.
+        scheduleFullHydration()
 
         startMetadataQueryIfNeeded()
     }
@@ -183,11 +219,14 @@ final class ConversationFileStore: ConversationStore {
         return msgs
     }
 
-    /// True while pass-2 hydration or a metadata-driven refresh is active.
-    /// Always false on the local backend (no remote sync to wait for).
+    /// True while the initial bootstrap, pass-2 hydration, or a metadata-driven
+    /// refresh is active. Always false on the local backend (no remote sync to
+    /// wait for) once ready.
     var isSyncing: Bool {
-        guard backend == .iCloud else { return false }
         cacheLock.lock(); defer { cacheLock.unlock() }
+        // Pre-ready (and during pass-1) we're still loading regardless of backend.
+        guard _isReady else { return true }
+        guard backend == .iCloud else { return false }
         return inflightRefresh || !inflightHydrations.isEmpty
     }
 
@@ -253,9 +292,11 @@ final class ConversationFileStore: ConversationStore {
         recomputeOrderedIdsLocked()
         cacheLock.unlock()
         postChangeNotification()
-        let url = fileURL(for: id)
         ioQueue.async { [weak self] in
-            self?.coordinatedRemove(url)
+            guard let self = self else { return }
+            // Compute the URL on `ioQueue` — `rootURL` is only guaranteed set
+            // after the bootstrap work item has run on this serial queue.
+            self.coordinatedRemove(self.fileURL(for: id))
         }
     }
 
@@ -680,6 +721,16 @@ final class ConversationFileStore: ConversationStore {
         }
     }
 
+    /// Fired once, on main, when pass-1 bootstrap completes and `isReady` flips
+    /// true. UI uses this to load the last conversation + drop the launch-time
+    /// chrome loading state.
+    private func postReadyNotification() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .conversationStoreDidBecomeReady,
+                                            object: nil)
+        }
+    }
+
     // MARK: - Ordered-ids helper (must hold `cacheLock`)
 
     private func recomputeOrderedIdsLocked() {
@@ -856,6 +907,23 @@ extension Notification.Name {
     /// Fired (on main) whenever the store's `isSyncing` may have flipped.
     /// Observers should re-read `ConversationFileStore.shared.isSyncing`.
     static let conversationStoreSyncStateChanged = Notification.Name("ConversationStoreSyncStateChanged")
+
+    /// Fired once (on main) when the store finishes its off-main bootstrap and
+    /// `isReady` becomes true. Lets the UI defer loading the last conversation
+    /// off the launch path so the storyboard never blocks on iCloud.
+    static let conversationStoreDidBecomeReady = Notification.Name("ConversationStoreDidBecomeReady")
+
+    /// Fired when an OpenClaw gateway turn's tool calls were reconciled from the
+    /// transcript after the reply landed (the live stream surfaced none). UserInfo
+    /// carries `conversationId`; an on-screen chat should reload to show the
+    /// "Used N tools" disclosure that just got patched into the last turn.
+    static let openClawToolCallsDidReconcile = Notification.Name("loop.openclaw.toolCallsDidReconcile")
+
+    /// Fired after an OpenClaw gateway turn when the agent produced image media
+    /// (a transcript artifact or a workspace file it referenced) that we fetched
+    /// and appended as standalone image bubble(s). UserInfo carries
+    /// `conversationId`; an on-screen chat should reload to show the new image(s).
+    static let openClawMediaDidAttach = Notification.Name("loop.openclaw.mediaDidAttach")
 
     /// Posted by `SimpleConversationManager.currentConversation` when the
     /// active-conversation id changes. UserInfo carries `conversationId`

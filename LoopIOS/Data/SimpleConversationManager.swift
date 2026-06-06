@@ -404,15 +404,19 @@ class SimpleConversationManager {
     /// final persisted assistant message — both on the main queue. The user
     /// message must already be persisted (via `addMessage`). Routes to the store
     /// that owns the conversation (falling back to the active remote backend).
-    func sendRemoteStreaming(text: String, conversationId id: String,
+    func sendRemoteStreaming(text: String, attachment: FileAttachment? = nil, conversationId id: String,
                              onDelta: @escaping (String) -> Void,
+                             onToolCall: @escaping (FunctionCallStruct) -> Void = { _ in },
                              completion: @escaping (Result<MessageStruct, Error>) -> Void) {
         let store = remoteStores.values.first(where: { $0.conversation(id: id) != nil })
             ?? ExecutionBackendStore.shared.activeRemoteBackendID.flatMap { remoteStores[$0] }
         guard let store = store else {
             completion(.failure(OpenClawGatewayError.notConnected)); return
         }
-        store.sendStreaming(text: text, conversationId: id, onDelta: onDelta) { [weak self] result in
+        let toolCall: (String, String?, [String: Any]) -> Void = { name, callId, input in
+            onToolCall(FunctionCallStruct(name: name, arguments: input, callId: callId, conversationId: id))
+        }
+        store.sendStreaming(text: text, attachment: attachment, conversationId: id, onDelta: onDelta, onToolCall: toolCall) { [weak self] result in
             switch result {
             case .success(let msg):
                 if let self = self, self.currentConversation?.id == id,

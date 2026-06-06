@@ -2,24 +2,41 @@
 // Square grid for the web (the iOS app uses 25×15 — wider than tall so it
 // crops into the chat layout — but on the web the orb stands alone so a
 // square reads more like a sphere). Same radial intensity formula, same
-// per-mode palette, same idle breathing math. Adds two web-only delighters
-// absent from the native app: cursor-lean and a click ripple.
+// per-mode palette, same idle breathing math. Same spherical "spin" the app
+// uses (SpinMode.spherical): each pixel is a point on a 3D sphere rotating
+// around the Y axis, so the surface texture orbits the center instead of
+// just sitting there. Adds two web-only delighters absent from the native
+// app: cursor-lean and a click ripple.
 //
 // Public API:
-//   Orb.mount(canvas, { density, mode, intensity, reactive }) → handle
+//   Orb.mount(canvas, { density, mode, intensity, reactive, spin }) → handle
 //   handle.setMode('idle' | 'listening') — flips palette for hold-to-talk
 //
-// No framework. ~120 LOC of vanilla JS. Reads as a single self-contained IIFE.
+// No framework. ~140 LOC of vanilla JS. Reads as a single self-contained IIFE.
 
 (function () {
   const PALETTES = {
     idle:      "217, 222, 235",   // (0.85, 0.87, 0.92) — soft cool white
-    listening: "51, 199, 255",    // systemCyan
+    listening: "51, 199, 255",    // systemCyan — attentive, resting
+    talking:   "51, 199, 255",    // systemCyan — actively responding (animated)
   };
 
   function mount(canvas, opts) {
     const o = Object.assign(
-      { density: 25, mode: "idle", intensity: 1.0, reactive: true, drift: true },
+      {
+        density: 25,
+        mode: "idle",
+        intensity: 1.0,
+        reactive: true,
+        drift: true,
+        // Spherical spin (AvatarView.SpinMode.spherical). `spin` toggles it;
+        // spinSpeed is Y-axis rotation in rad/s; spinBands is the longitudinal
+        // band count of the procedural surface texture. Both lifted from
+        // AvatarView.swift's `rotationSpeed` / `spinBandCount`.
+        spin: true,
+        spinSpeed: 1.2,
+        spinBands: 4.0,
+      },
       opts || {}
     );
 
@@ -50,10 +67,37 @@
     const start = performance.now();
 
     function rgba(level) {
-      // Quantize alpha into 5 bins, matching the native orb's 5-level appearance.
+      // Continuous per-cell alpha, like the native orb (AvatarView draws each
+      // cell with `withAlphaComponent(alpha)` — no quantization). The grid
+      // itself supplies the pixel-art look; quantizing the alpha on top of it
+      // just flattens the spin's subtle band modulation into a single bin, so
+      // the orb reads as static. Keeping alpha smooth lets the rotation show.
       const q = Math.max(0, Math.min(1, level));
-      const bin = Math.round(q * 4) / 4;
-      return `rgba(${PALETTES[mode]}, ${(bin * o.intensity).toFixed(3)})`;
+      return `rgba(${PALETTES[mode]}, ${(q * o.intensity).toFixed(3)})`;
+    }
+
+    // Port of AvatarView.swift `sphericalIntensity`: treat the cell (dx, dy)
+    // as a point on a sphere of radius r, recover z, then rotate longitude by
+    // spinSpeed·t so the banded surface texture orbits the center. Equator
+    // moves fast, poles barely move — reads as a spinning globe. Limb
+    // darkening + a fixed specular highlight give it volume.
+    function spherical(base, dx, dy, r, t) {
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= r) return base;
+
+      const z = Math.sqrt(Math.max(0, r * r - dx * dx - dy * dy));
+      const lon = Math.atan2(dx, z) + o.spinSpeed * t;
+      const lat = Math.asin(Math.max(-1, Math.min(1, dy / r)));
+      const pattern = 0.82 + 0.18 * Math.sin(lon * o.spinBands + lat * 1.5);
+
+      const cosAngle = z / r;
+      const limb = 0.55 + 0.45 * Math.pow(cosAngle, 0.6);
+
+      const nx = dx / r, ny = dy / r, nz = z / r;
+      const ldot = Math.max(0, nx * 0.5 + ny * -0.5 + nz * 0.7071);
+      const spec = Math.pow(ldot, 16) * 0.25;
+
+      return base * pattern * limb + spec;
     }
 
     function draw() {
@@ -63,11 +107,24 @@
       const cx = (cells - 1) / 2;
       const cy = (cells - 1) / 2;
 
-      // Idle breathing — sin(t * 1.4) * 0.066 * baseR — pulled from
-      // AvatarView.swift `shape(for: .idle)`. Listening shrinks the
-      // resting radius slightly so the cyan glow reads as "attentive".
+      // Per-mode radius + fill, pulled from AvatarView.swift `shape(for:)`.
+      //   idle      — gentle breathing, sin(t*1.4)*0.066*baseR
+      //   listening — shrinks the resting radius so the cyan glow reads "attentive"
+      //   talking   — speaking wobble: the orb actively grows/pulses as if it's
+      //               mid-response (AvatarView's .speaking fallback, two summed sines)
       const baseR = cells * 0.34;
-      const breathe = baseR + (mode === "listening" ? -baseR * 0.08 : baseR * 0.066 * Math.sin(t * 1.4));
+      let breathe, scale;
+      if (mode === "talking") {
+        const wobble = Math.abs(0.5 * Math.sin(t * 7.0) + 0.3 * Math.sin(t * 4.3));
+        breathe = baseR + baseR * 0.474 * wobble;
+        scale = 0.7 + 0.3 * wobble;
+      } else if (mode === "listening") {
+        breathe = baseR - baseR * 0.08;
+        scale = 0.62;
+      } else {
+        breathe = baseR + baseR * 0.066 * Math.sin(t * 1.4);
+        scale = 0.45;
+      }
 
       // Cursor-lean (web-only): shifts the highlight center toward the
       // cursor by up to ±0.18 grid units of the radius. Tiny but readable.
@@ -83,7 +140,6 @@
       if (ping > 0) mouse.ping = Math.max(0, ping - 0.018);
 
       const r = breathe;
-      const scale = mode === "listening" ? 0.62 : 0.45;
 
       for (let y = 0; y < cells; y++) {
         for (let x = 0; x < cells; x++) {
@@ -100,6 +156,9 @@
           } else {
             i = Math.max(0, 1 - (d - r) * 1.4) * scale * 0.7;
           }
+
+          // Orbit the surface texture around the center (matches the app).
+          if (o.spin) i = spherical(i, dx, dy, r, t);
 
           if (i < 0.04) continue;
 

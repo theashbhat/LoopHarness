@@ -56,4 +56,12 @@ final class RemoteWorkspaceStores {
         guard let id = ExecutionBackendStore.shared.activeRemoteBackendID else { return nil }
         return skillStores[id]
     }
+
+    /// The file store for a specific backend, if one exists. Lets the conversation
+    /// store reuse the cached store (and its listing cache) to upload message
+    /// attachments into the VM workspace, so an uploaded file also shows up in the
+    /// Files tab without a separate fetch.
+    func fileStore(for backendID: String) -> OpenClawFileStore? {
+        fileStores[backendID]
+    }
 }

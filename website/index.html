@@ -9,6 +9,17 @@
 <meta property="og:description" content="A personal AI for Apple devices. Skills, memory, voice — local-first, with your own keys. Open-source." />
 <meta property="og:url" content="https://loopharness.com" />
 <meta property="og:type" content="website" />
+<!-- Share card is generated on the fly by the /api/og edge function (see api/og.tsx);
+     served at a clean .png URL via the rewrite in vercel.json. -->
+<meta property="og:image" content="https://loopharness.com/og-cover.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:alt" content="Loop — a personal AI that lives on your devices" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Loop — a personal AI that lives on your devices" />
+<meta name="twitter:description" content="A personal AI for Apple devices. Skills, memory, voice — local-first, with your own keys. Open-source." />
+<meta name="twitter:image" content="https://loopharness.com/og-cover.png" />
 <meta name="theme-color" content="#0a0a0a" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -21,7 +32,7 @@
 <header class="hero">
   <nav class="nav nav--dark">
     <a class="nav__brand" href="#">
-      <span class="nav__brand-orb"></span>
+      <canvas class="nav__brand-orb" data-orb="nav" aria-hidden="true"></canvas>
       <span>Loop</span>
     </a>
     <div class="nav__links">
@@ -70,6 +81,7 @@
 
   <div class="hold-strip" id="voice" data-hold>
     <div class="hold-strip__key" data-hold-key>HOLD</div>
+    <div class="hold-strip__wave" data-hold-wave aria-hidden="true"></div>
     <div class="hold-strip__txt" data-hold-txt>press and hold to speak →</div>
     <div class="hold-strip__dot" data-hold-dot></div>
   </div>
@@ -289,7 +301,7 @@
 <!-- ────────── FOOTER ────────── -->
 <footer class="foot">
   <div class="foot__left">
-    <span class="foot__orb"></span>
+    <canvas class="foot__orb" data-orb="foot" aria-hidden="true"></canvas>
     <span class="foot__brand">Loop</span>
     <span class="foot__by">© 2026 · made with care, in San Francisco</span>
   </div>

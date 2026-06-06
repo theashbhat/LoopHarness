@@ -288,7 +288,14 @@ final class OpenClawConversationStore: ConversationStore {
         // Gateway-WS path is driven explicitly by the UI (`sendStreaming`) so it
         // can stream into the bubble — skip the CLI enqueue there.
         if message.role == "user" && !Self.useGatewayWS {
-            enqueueAgentTurn(message: message.content, conversationId: id)
+            // Decode the user-uploaded attachment (persisted as a JSON string on the
+            // SimpleMessage) so the CLI turn can upload it + reference its VM path,
+            // matching the Gateway path.
+            let attachment = message.fileAttachment.flatMap { str -> FileAttachment? in
+                guard let data = str.data(using: .utf8) else { return nil }
+                return try? JSONDecoder().decode(FileAttachment.self, from: data)
+            }
+            enqueueAgentTurn(message: message.content, attachment: attachment, conversationId: id)
         }
     }
 
@@ -339,7 +346,7 @@ final class OpenClawConversationStore: ConversationStore {
         let cmd = """
         \(pathPrefix) if command -v openclaw >/dev/null 2>&1; then echo OPENCLAW_OK; openclaw sessions --json --agent \(agent) 2>/dev/null; else echo OPENCLAW_MISSING; fi
         """
-        let result = try await SSHSkill.shared.runCommand(cmd, on: config.sshConfig, timeout: 25)
+        let result = try await SSHSkill.shared.runOpenClawCommand(cmd, on: config.sshConfig, timeout: 25)
         if result.stdout.contains("OPENCLAW_MISSING") {
             throw OpenClawError.cliNotFound
         }
@@ -406,7 +413,7 @@ final class OpenClawConversationStore: ConversationStore {
                 let agent = Self.shQuote(config.trimmedAgentId)
                 let cmd = "\(Self.pathPrefix) openclaw sessions --json --agent \(agent) 2>/dev/null"
                 let result = self.runBlocking {
-                    try await SSHSkill.shared.runCommand(cmd, on: config.sshConfig, timeout: 30)
+                    try await SSHSkill.shared.runOpenClawCommand(cmd, on: config.sshConfig, timeout: 30)
                 }
                 guard case .success(let cmdResult) = result else {
                     if case .failure(let error) = result {
@@ -608,7 +615,7 @@ final class OpenClawConversationStore: ConversationStore {
     /// Default transport (`useStreamingExec`): the turn runs *foreground* over the
     /// persistent connection (`streamAgentTurn`), so the reply lands the instant
     /// the turn completes — no per-poll SSH handshake, no detach+log dance.
-    private func enqueueAgentTurn(message: String, conversationId: String) {
+    private func enqueueAgentTurn(message: String, attachment: FileAttachment? = nil, conversationId: String) {
         let config = self.config
         guard config.isConfigured else { return }
         cacheLock.lock()
@@ -616,28 +623,36 @@ final class OpenClawConversationStore: ConversationStore {
         inFlightRuns.insert(conversationId)
         cacheLock.unlock()
 
-        let b64 = Data(message.utf8).base64EncodedString()
         let agentQ = Self.shQuote(config.trimmedAgentId)
         // Each conversation always runs against its own `--session-id` (app-created
         // chats get a unique `loop-<id>` session) so a new chat is an isolated
         // thread, never the shared agent `main` session.
         let sidQ = Self.shQuote(sessionId)
 
-        guard Self.useStreamingExec else {
-            legacyEnqueueDetachedTurn(b64: b64, agentQ: agentQ, sidQ: sidQ,
-                                      conversationId: conversationId, config: config)
-            return
-        }
+        // Upload any attachment + fold its hint into the message off the main thread
+        // (`wireText` is async), then dispatch the turn. The base64 reconstitution
+        // below handles the larger combined message just as safely as plain text.
+        Task { [weak self] in
+            guard let self = self else { return }
+            let outgoing = await self.wireText(for: message, attachment: attachment)
+            let b64 = Data(outgoing.utf8).base64EncodedString()
 
-        // Foreground turn. `MSG` is reconstituted on the host from base64 so
-        // arbitrary content can't break quoting, then passed as `-m "$MSG"` (a
-        // shell var's expanded value isn't re-parsed, so quotes/backticks inside
-        // it stay literal). No nohup/log: stdout carries the `--json` result and
-        // the exec channel's exit status marks completion.
-        let cmd = """
-        \(Self.pathPrefix) MSG=$(printf %s \(Self.shQuote(b64)) | base64 -d); AGENT=\(agentQ); SID=\(sidQ); if [ -n "$SID" ]; then openclaw agent --agent "$AGENT" --session-id "$SID" -m "$MSG" --json; else openclaw agent --agent "$AGENT" -m "$MSG" --json; fi
-        """
-        streamAgentTurn(cmd, conversationId: conversationId, config: config)
+            guard Self.useStreamingExec else {
+                self.legacyEnqueueDetachedTurn(b64: b64, agentQ: agentQ, sidQ: sidQ,
+                                               conversationId: conversationId, config: config)
+                return
+            }
+
+            // Foreground turn. `MSG` is reconstituted on the host from base64 so
+            // arbitrary content can't break quoting, then passed as `-m "$MSG"` (a
+            // shell var's expanded value isn't re-parsed, so quotes/backticks inside
+            // it stay literal). No nohup/log: stdout carries the `--json` result and
+            // the exec channel's exit status marks completion.
+            let cmd = """
+            \(Self.pathPrefix) MSG=$(printf %s \(Self.shQuote(b64)) | base64 -d); AGENT=\(agentQ); SID=\(sidQ); if [ -n "$SID" ]; then openclaw agent --agent "$AGENT" --session-id "$SID" -m "$MSG" --json; else openclaw agent --agent "$AGENT" -m "$MSG" --json; fi
+            """
+            self.streamAgentTurn(cmd, conversationId: conversationId, config: config)
+        }
     }
 
     /// Stream a foreground `openclaw agent --json` turn over the persistent
@@ -833,12 +848,51 @@ final class OpenClawConversationStore: ConversationStore {
         }
     }
 
+    /// Upload a user message's file attachment into the VM workspace and return the
+    /// hint text to append to the outgoing message, so the agent can open/read the
+    /// real file with its own tools (the only way it can "see" an image; OpenClaw's
+    /// transports carry text only). Reuses the proven base64-pipe-over-SSH
+    /// `OpenClawFileStore.write` — a plain shell write, NOT an `openclaw` CLI call,
+    /// so it doesn't contend on the gateway daemon's 1-client serialization gate.
+    ///
+    /// Best effort: on read/upload failure we fall back to the on-device
+    /// `assistantHint` (so any extracted text still reaches the agent) rather than
+    /// blocking the turn. Returns nil only when there's nothing to attach.
+    private func prepareRemoteAttachment(_ attachment: FileAttachment) async -> String? {
+        guard attachment.status == .ready else { return nil }
+        // `attachments/<id>-<name>` under the workspace. The UUID prefix avoids
+        // collisions; strip `/` from the filename so it stays a single path
+        // component (`OpenClawFileStore.write` shQuotes it and rejects `..`/abs).
+        let safeName = attachment.fileName.replacingOccurrences(of: "/", with: "_")
+        let relPath = "attachments/\(attachment.id)-\(safeName)"
+        do {
+            let data = try Data(contentsOf: attachment.fileURL)
+            let store = RemoteWorkspaceStores.shared.fileStore(for: backendID)
+                ?? OpenClawFileStore(backendID: backendID, config: config)
+            try await store.write(data, to: relPath)
+            openClawLog.info("uploaded attachment \(attachment.id, privacy: .public) → \(relPath, privacy: .public)")
+            return attachment.remoteHint(workspaceRelPath: relPath)
+        } catch {
+            openClawLog.error("attachment upload failed (\(attachment.id, privacy: .public)): \(error.localizedDescription, privacy: .public) — falling back to inline hint")
+            return attachment.assistantHint
+        }
+    }
+
+    /// Combine a user turn's typed text with the prepared attachment hint, uploading
+    /// the file first. Shared by the Gateway and CLI send paths.
+    private func wireText(for text: String, attachment: FileAttachment?) async -> String {
+        guard let attachment = attachment,
+              let hint = await prepareRemoteAttachment(attachment) else { return text }
+        return text.isEmpty ? hint : text + "\n\n" + hint
+    }
+
     /// Drives a user turn over the warm Gateway session, streaming the reply.
     /// `onDelta` gets incremental text (derived from the gateway's cumulative
     /// frames) and `completion` the persisted assistant message — both on the main
     /// queue. The user message is assumed already persisted via `addMessage`.
-    func sendStreaming(text: String, conversationId: String,
+    func sendStreaming(text: String, attachment: FileAttachment? = nil, conversationId: String,
                        onDelta: @escaping (String) -> Void,
+                       onToolCall: @escaping (_ name: String, _ callId: String?, _ input: [String: Any]) -> Void = { _, _, _ in },
                        completion: @escaping (Result<SimpleMessage, Error>) -> Void) {
         cacheLock.lock(); inFlightRuns.insert(conversationId); cacheLock.unlock()
         let stream = StreamState()
@@ -846,10 +900,19 @@ final class OpenClawConversationStore: ConversationStore {
         // double-fire `completion`. All three sites run on the client's event
         // queue / this Task and are mutually exclusive in time.
         var finished = false
+        // Tool calls collected over the turn, in canonical `functionCallsJSON`
+        // shape (`{name, arguments, callId?}`). Mutated only on the client's serial
+        // event queue (onToolCall / onTurnComplete), so no extra locking.
+        var toolCalls: [[String: Any]] = []
+        var callIndexById: [String: Int] = [:]
         // Time-to-first-token, measured from when the message is sent (excludes the
         // one-time connect on the first turn). Surfaced in the reply's label.
         var ttft: TimeInterval?
         var turnStart = Date()
+        // The run id from `sessions.send`, captured so the post-turn media fetch can
+        // scope `artifacts.list` to this turn. Set after the send below; read in
+        // `onTurnComplete`, which fires strictly later.
+        var turnRunId: String?
         Task { [weak self] in
             guard let self = self else { return }
             do {
@@ -861,13 +924,37 @@ final class OpenClawConversationStore: ConversationStore {
                     let delta = stream.delta(for: cumulative)
                     if !delta.isEmpty { DispatchQueue.main.async { onDelta(delta) } }
                 }
+                client.onToolCall = { name, callId, input in
+                    guard !finished else { return }
+                    var entry: [String: Any] = ["name": name, "arguments": input]
+                    if let callId = callId { entry["callId"] = callId }
+                    // Dedupe by callId so a cumulatively-streamed call updates in
+                    // place rather than appending duplicates.
+                    if let callId = callId, let idx = callIndexById[callId] {
+                        toolCalls[idx] = entry
+                    } else {
+                        if let callId = callId { callIndexById[callId] = toolCalls.count }
+                        toolCalls.append(entry)
+                    }
+                    DispatchQueue.main.async { onToolCall(name, callId, input) }
+                }
                 client.onTurnComplete = { [weak self] in
                     guard let self = self, !finished else { return }
                     finished = true
                     let total = Date().timeIntervalSince(turnStart)
-                    openClawLog.info("gateway turn complete: ttft=\(ttft ?? -1, privacy: .public)s total=\(total, privacy: .public)s")
-                    let msg = self.finalizeGatewayReply(text: stream.latest, ttft: ttft, model: model, conversationId: conversationId)
+                    openClawLog.info("gateway turn complete: ttft=\(ttft ?? -1, privacy: .public)s total=\(total, privacy: .public)s tools=\(toolCalls.count, privacy: .public)")
+                    let msg = self.finalizeGatewayReply(text: stream.latest, toolCalls: toolCalls, ttft: ttft, model: model, conversationId: conversationId)
                     DispatchQueue.main.async { completion(.success(msg)) }
+                    // After the text reply lands, pull any image the agent produced
+                    // (a transcript artifact or a workspace file it referenced) and
+                    // append it as its own bubble. Best effort, off the turn's
+                    // critical path — a failure just means no inline image.
+                    let replyText = stream.latest
+                    let rid = turnRunId
+                    Task { [weak self] in
+                        await self?.fetchAndAttachMedia(conversationId: conversationId,
+                                                        runId: rid, replyText: replyText, client: client)
+                    }
                 }
                 client.onError = { [weak self] error in
                     guard let self = self, !finished else { return }
@@ -876,8 +963,11 @@ final class OpenClawConversationStore: ConversationStore {
                     DispatchQueue.main.async { completion(.failure(error)) }
                 }
                 let sessionKey = try await self.resolveGatewaySessionKey(for: conversationId, client: client)
-                turnStart = Date()   // reset to the actual send moment (post-connect)
-                _ = try await client.send(text, sessionKey: sessionKey)
+                // Upload any attachment + fold its hint into the message before the
+                // turn (sequences naturally; excluded from the TTFT measured below).
+                let outgoing = await self.wireText(for: text, attachment: attachment)
+                turnStart = Date()   // reset to the actual send moment (post-connect + upload)
+                turnRunId = try await client.send(outgoing, sessionKey: sessionKey)
             } catch {
                 guard !finished else { return }
                 finished = true
@@ -888,15 +978,21 @@ final class OpenClawConversationStore: ConversationStore {
     }
 
     /// Persist a completed assistant reply to the cache + mirror, clear in-flight,
-    /// and return the message for the UI to render.
-    private func finalizeGatewayReply(text: String, ttft: TimeInterval?, model: String?,
+    /// and return the message for the UI to render. `toolCalls` are the calls the
+    /// agent made this turn (canonical `functionCallsJSON` shape), captured live
+    /// off the Gateway stream so they persist + render in the "Used N tools"
+    /// disclosure. When none were captured live, a transcript reconcile fills them.
+    private func finalizeGatewayReply(text: String, toolCalls: [[String: Any]],
+                                      ttft: TimeInterval?, model: String?,
                                       conversationId id: String) -> SimpleMessage {
         // `responseSeconds` renders as the time-to-first-token next to the model
         // name in the reply label (see `MessageStruct.ttft` / `modelText`).
         // Fall back to "OpenClaw" so the label never shows the local placeholder
         // model when the session model wasn't captured.
+        let callsJSON = Self.encodeToolCalls(toolCalls)
         let assistant = SimpleMessage(id: UUID().uuidString, role: "assistant",
-                                      content: text, model: model ?? "OpenClaw",
+                                      content: text, functionCallsJSON: callsJSON,
+                                      model: model ?? "OpenClaw",
                                       responseSeconds: ttft, createdAt: Date())
         cacheLock.lock()
         var conv = cache[id] ?? SimpleConversation(id: id, title: "Conversation", backend: backendID)
@@ -908,7 +1004,295 @@ final class OpenClawConversationStore: ConversationStore {
         cacheLock.unlock()
         writeMirror(conv)
         postChange()
+        // Backstop: the live stream surfaced no tool calls (the daemon may not
+        // stream them, or the frame shape changed) — reconcile from the
+        // authoritative transcript so the disclosure still appears a beat later.
+        openClawLog.info("TOOLDIAG finalize: liveTools=\(toolCalls.count, privacy: .public) callsJSON=\(callsJSON ?? "nil", privacy: .public)")
+        if callsJSON == nil {
+            scheduleToolReconcile(conversationId: id, assistantMessageId: assistant.id)
+        }
         return assistant
+    }
+
+    // MARK: - Inline media (agent-produced attachments)
+
+    /// One renderable attachment the agent surfaced this turn.
+    private struct InlineMediaItem {
+        let data: Data
+        let name: String
+        let kind: FileAttachment.Kind   // .image renders inline; others as a file card
+    }
+
+    /// After a gateway turn, fetch any file the agent surfaced and append it as a
+    /// standalone bubble. OpenClaw's `agent` stream is text-only and the daemon
+    /// suppresses attachment *delivery* to an internal/webchat session
+    /// (`deliveryStatus: suppressed`), so we PULL the file two ways:
+    ///   1. Native `artifacts.list`/`download` scoped to the run (the clean path).
+    ///   2. Filepath references in the reply text — a `workspace://` URL, a markdown
+    ///      target, a bare filename, or an absolute/`~` path the agent named —
+    ///      fetched over SSH (`OpenClawFileStore.readAnyPath`, which handles paths
+    ///      outside the workspace too). A bare filename is located via `find`.
+    /// Images render inline (`ImageAttachment`); PDFs/other render as a tappable
+    /// file card (`FileAttachment`). Each becomes its own assistant `SimpleMessage`
+    /// so the agent's prose stays intact. All best-effort: failures yield nothing.
+    private func fetchAndAttachMedia(conversationId id: String, runId: String?,
+                                     replyText: String, client: OpenClawGatewayClient) async {
+        var media: [InlineMediaItem] = []
+        var seenNames = Set<String>()
+        let mediaCap = 15_000_000
+
+        // 1) Native artifacts (best-effort; live shape unconfirmed — see client).
+        if let runId = runId {
+            let entries = (try? await client.listArtifacts(runId: runId)) ?? []
+            for entry in entries.prefix(6) {
+                let name = (entry["name"] as? String) ?? "artifact-\(media.count)"
+                let mime = (entry["mimeType"] as? String) ?? (entry["mime"] as? String) ?? ""
+                guard let kind = Self.renderableKind(name: name, mime: mime) else { continue }
+                guard seenNames.insert(name).inserted else { continue }
+                if let data = try? await client.downloadArtifact(runId: runId, entry: entry), !data.isEmpty {
+                    media.append(InlineMediaItem(data: data, name: name, kind: kind))
+                }
+            }
+        }
+
+        // 2) Filepath references in the reply text.
+        let refs = Self.mediaRefs(in: replyText)
+        openClawLog.debug("inline media: \(refs.count, privacy: .public) file ref(s) in reply for \(id, privacy: .public)")
+        if !refs.isEmpty {
+            let store = RemoteWorkspaceStores.shared.fileStore(for: backendID)
+                ?? OpenClawFileStore(backendID: backendID, config: config)
+            for ref in refs.prefix(6) {
+                let base = (ref.path as NSString).lastPathComponent
+                guard seenNames.insert(base).inserted else { continue }
+                if let data = await Self.fetchRemoteMedia(ref.path, base: base, store: store, maxBytes: mediaCap),
+                   !data.isEmpty {
+                    media.append(InlineMediaItem(data: data, name: base, kind: ref.kind))
+                }
+            }
+        }
+
+        guard !media.isEmpty else { return }
+
+        var appended = false
+        for item in media {
+            guard let fileURL = Self.writeInlineMediaFile(item.data, suggestedName: item.name) else { continue }
+            let msg: SimpleMessage
+            if item.kind == .image {
+                guard let json = Self.encodeJSON(
+                    ImageAttachment(prompt: item.name, fileURL: fileURL, status: .ready, conversationId: id)) else { continue }
+                msg = SimpleMessage(id: UUID().uuidString, role: "assistant", content: "",
+                                    imageAttachment: json, model: "OpenClaw", createdAt: Date())
+            } else {
+                let fa = FileAttachment(fileURL: fileURL, fileName: item.name, kind: item.kind,
+                                        mimeType: Self.mimeForName(item.name), status: .ready)
+                guard let json = Self.encodeJSON(fa) else { continue }
+                msg = SimpleMessage(id: UUID().uuidString, role: "assistant", content: "",
+                                    fileAttachment: json, model: "OpenClaw", createdAt: Date())
+            }
+            cacheLock.lock()
+            var conv = cache[id] ?? SimpleConversation(id: id, title: "Conversation", backend: backendID)
+            conv.messages.append(msg)
+            conv.updatedAt = Date()
+            cache[id] = conv
+            recomputeOrderedIdsLocked()
+            cacheLock.unlock()
+            writeMirror(conv)
+            appended = true
+        }
+        guard appended else { return }
+        openClawLog.info("attached \(media.count, privacy: .public) inline attachment(s) for \(id, privacy: .public)")
+        postChange()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .openClawMediaDidAttach, object: nil,
+                                            userInfo: ["conversationId": id])
+        }
+    }
+
+    /// Resolve a referenced path to bytes over SSH. Absolute (`/…`) and home (`~/…`)
+    /// paths are read directly (may live outside the workspace); a relative path
+    /// with a directory is read workspace-relative; a bare filename is located
+    /// anywhere under the workspace via `find`, then read.
+    private static func fetchRemoteMedia(_ path: String, base: String,
+                                         store: OpenClawFileStore, maxBytes: Int) async -> Data? {
+        if path.hasPrefix("/") || path.hasPrefix("~") {
+            return try? await store.readAnyPath(path, maxBytes: maxBytes)
+        }
+        if path.contains("/"), let data = try? await store.readAnyPath(path, maxBytes: maxBytes) {
+            return data
+        }
+        if let found = try? await store.findFile(named: base),
+           let data = try? await store.readAnyPath(found, maxBytes: maxBytes) {
+            return data
+        }
+        return try? await store.readAnyPath(base, maxBytes: maxBytes)   // workspace-root fallback
+    }
+
+    /// Classify a file as renderable inline: images render in an image bubble, PDFs
+    /// as a file card. Anything else returns nil (not surfaced). Keyed off mime when
+    /// present (artifacts), else the extension (reply-text refs).
+    private static func renderableKind(name: String, mime: String) -> FileAttachment.Kind? {
+        let ext = (name as NSString).pathExtension.lowercased()
+        if mime.hasPrefix("image/") || ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"].contains(ext) {
+            return .image
+        }
+        if mime == "application/pdf" || ext == "pdf" { return .pdf }
+        return nil
+    }
+
+    private static func mimeForName(_ name: String) -> String {
+        switch (name as NSString).pathExtension.lowercased() {
+        case "png":           return "image/png"
+        case "jpg", "jpeg":   return "image/jpeg"
+        case "gif":           return "image/gif"
+        case "webp":          return "image/webp"
+        case "heic", "heif":  return "image/heic"
+        case "pdf":           return "application/pdf"
+        default:              return "application/octet-stream"
+        }
+    }
+
+    private static func encodeJSON<T: Encodable>(_ value: T) -> String? {
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Extract filepath references to renderable files (images + PDFs) from reply
+    /// text, paired with their kind. Catches `workspace://` URLs, markdown targets,
+    /// absolute/`~` paths, and bare filenames; skips external URLs (http/mailto/data).
+    /// Absolute/`~` paths are preserved as-is so `readAnyPath` can fetch them.
+    static func mediaRefs(in text: String) -> [(path: String, kind: FileAttachment.Kind)] {
+        let ext = "(?:png|jpe?g|gif|webp|heic|heif|pdf)"
+        var out: [(String, FileAttachment.Kind)] = []
+        var seen = Set<String>()
+        func add(_ raw: String) {
+            var p = raw.trimmingCharacters(in: .whitespaces)
+            if let r = p.range(of: "workspace://") { p = String(p[r.upperBound...]) }
+            let lower = p.lowercased()
+            guard !lower.hasPrefix("http://"), !lower.hasPrefix("https://"),
+                  !lower.hasPrefix("mailto:"), !lower.hasPrefix("data:") else { return }
+            while p.hasPrefix("./") { p = String(p.dropFirst(2)) }   // keep absolute `/` and `~`
+            guard !p.isEmpty, let kind = renderableKind(name: p, mime: ""), seen.insert(p).inserted else { return }
+            out.append((p, kind))
+        }
+        let patterns = [
+            "workspace://([^\\s)\\]\"']+\\.\(ext))",        // workspace:// scheme
+            "\\]\\(\\s*([^\\s)]+\\.\(ext))\\s*\\)",          // markdown [text](target)
+            "((?:~?/)[^\\s)\\]\"'`]*\\.\(ext))",            // absolute `/…` or home `~/…`
+            // Bare filename/path the agent names in prose or inline code, e.g.
+            // `gandalf-engineer-square.png`. Broad on purpose — a non-existent match
+            // just fails the workspace `find` harmlessly.
+            "([A-Za-z0-9][A-Za-z0-9._/\\-]*\\.\(ext))\\b",
+        ]
+        for pattern in patterns {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            let ns = text as NSString
+            re.enumerateMatches(in: text, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+                guard let m = m, m.numberOfRanges > 1 else { return }
+                add(ns.substring(with: m.range(at: 1)))
+            }
+        }
+        return out
+    }
+
+    /// Write fetched bytes to an on-device `agent-media/` dir (where the attachment's
+    /// `fileURL` lives) preserving the real extension so QuickLook/`UIImage` can read
+    /// it, and return the local URL.
+    private static func writeInlineMediaFile(_ data: Data, suggestedName: String) -> URL? {
+        let rawExt = (suggestedName as NSString).pathExtension.lowercased()
+        let safeExt = rawExt.filter { $0.isLetter || $0.isNumber }
+        let ext = safeExt.isEmpty ? "bin" : safeExt
+        let dir = Workspace.shared.rootURL.appendingPathComponent("agent-media", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(UUID().uuidString).\(ext)")
+        do { try data.write(to: url, options: .atomic); return url } catch { return nil }
+    }
+
+    /// JSON-encode collected tool calls into the canonical `functionCallsJSON`
+    /// string, or nil when there are none.
+    static func encodeToolCalls(_ calls: [[String: Any]]) -> String? {
+        guard !calls.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: calls),
+              let string = String(data: data, encoding: .utf8) else { return nil }
+        return string
+    }
+
+    /// Merge the `functionCallsJSON` of the trailing assistant turn(s) — every
+    /// assistant message after the last user message — into one canonical array
+    /// string. Used to patch a finished gateway turn from its transcript.
+    static func trailingToolCallsJSON(from messages: [SimpleMessage]) -> String? {
+        let lastUserIdx = messages.lastIndex(where: { $0.role == "user" }) ?? -1
+        var merged: [[String: Any]] = []
+        for m in messages[(lastUserIdx + 1)...] where m.role == "assistant" {
+            if let js = m.functionCallsJSON, let d = js.data(using: .utf8),
+               let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] {
+                merged.append(contentsOf: arr)
+            }
+        }
+        return encodeToolCalls(merged)
+    }
+
+    /// Read the session transcript and patch the just-finished assistant message
+    /// with the tool calls it shows (the transcript is authoritative). MUST be
+    /// cheap and best-effort — a failure leaves the streamed reply untouched.
+    private func scheduleToolReconcile(conversationId id: String, assistantMessageId msgId: String) {
+        let config = self.config
+        guard config.isConfigured else { return }
+        cacheLock.lock()
+        let sessionId = remoteSessionIds[id] ?? openClawSessionIdLocked(for: id)
+        cacheLock.unlock()
+        openClawLog.info("TOOLDIAG reconcile: scheduling for sessionId=\(sessionId, privacy: .public)")
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            let file = Self.sessionFileExpression(for: config, sessionId: sessionId)
+            let cmd = "[ -e \(file) ] && tail -c \(Self.transcriptReadCap) \(file) | base64 || true"
+            let result = self.runBlocking {
+                try await SSHSkill.shared.runCommand(cmd, on: config.sshConfig, timeout: 25)
+            }
+            guard case .success(let cmdResult) = result else {
+                openClawLog.info("TOOLDIAG reconcile: SSH read FAILED for sessionId=\(sessionId, privacy: .public)")
+                return
+            }
+            let cleaned = cmdResult.stdout
+                .replacingOccurrences(of: "\n", with: "")
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            guard let data = Data(base64Encoded: cleaned),
+                  let txt = String(data: data, encoding: .utf8) else {
+                openClawLog.info("TOOLDIAG reconcile: empty/undecodable transcript for sessionId=\(sessionId, privacy: .public) stdoutLen=\(cmdResult.stdout.count, privacy: .public)")
+                return
+            }
+            let parsed = Self.parseSessionTranscript(txt, sessionId: sessionId)
+            let withTools = parsed.filter { $0.functionCallsJSON != nil }.count
+            openClawLog.info("TOOLDIAG reconcile: sessionId=\(sessionId, privacy: .public) txtLen=\(txt.count, privacy: .public) parsed=\(parsed.count, privacy: .public) msgsWithTools=\(withTools, privacy: .public)")
+            // TEMP(tooldiag): dump the last few raw transcript lines so we can see
+            // the exact tool-call shape if extraction found none.
+            if withTools == 0 {
+                let tail = txt.split(separator: "\n").suffix(4).joined(separator: "\n⏎ ")
+                openClawLog.info("TOOLDIAG reconcile rawtail: \(tail, privacy: .public)")
+            }
+            guard let callsJSON = Self.trailingToolCallsJSON(from: parsed) else { return }
+            openClawLog.info("TOOLDIAG reconcile: patching msg=\(msgId, privacy: .public) calls=\(callsJSON, privacy: .public)")
+            self.cacheLock.lock()
+            guard var conv = self.cache[id],
+                  let idx = conv.messages.firstIndex(where: { $0.id == msgId }) else {
+                self.cacheLock.unlock(); return
+            }
+            let old = conv.messages[idx]
+            conv.messages[idx] = SimpleMessage(id: old.id, role: old.role, content: old.content,
+                                               functionCallsJSON: callsJSON, model: old.model,
+                                               responseSeconds: old.responseSeconds, createdAt: old.createdAt)
+            self.cache[id] = conv
+            self.cacheLock.unlock()
+            self.writeMirror(conv)
+            self.postChange()
+            // postChange() refreshes the side drawer / lists, but MessagingVC keeps
+            // its own `messages` snapshot — nudge it to reload the open chat so the
+            // patched disclosure appears without waiting for a reopen.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .openClawToolCallsDidReconcile,
+                                                object: nil, userInfo: ["conversationId": id])
+            }
+        }
     }
 
     private static func runLogPath(for conversationId: String) -> String {
@@ -992,9 +1376,10 @@ final class OpenClawConversationStore: ConversationStore {
 
     /// Parse an OpenClaw transcript `.jsonl` into Loop messages. Each line is one
     /// JSON event; we keep `type:"message"` events with role user/assistant that
-    /// carry text, mapping Anthropic-style content blocks to plain text. (Tool
-    /// steps are elided in this pass.) Unparseable lines — including a truncated
-    /// leading line from a capped read — are skipped.
+    /// carry text *or* tool calls, mapping Anthropic-style content blocks to plain
+    /// text plus a `functionCallsJSON` payload (so the VM agent's tool steps render
+    /// in the existing "Used N tools" disclosure). Unparseable lines — including a
+    /// truncated leading line from a capped read — are skipped.
     static func parseSessionTranscript(_ text: String, sessionId: String) -> [SimpleMessage] {
         var messages: [SimpleMessage] = []
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
@@ -1006,7 +1391,10 @@ final class OpenClawConversationStore: ConversationStore {
             let role = (message["role"] as? String) ?? ""
             guard role == "user" || role == "assistant" else { continue }
             let content = extractText(from: message["content"])
-            guard !content.isEmpty else { continue }
+            // Assistant turns may be tool-only (no text); keep them so the tool
+            // disclosure still renders. User turns must carry text.
+            let toolCallsJSON = role == "assistant" ? extractToolCallsJSON(from: message["content"]) : nil
+            guard !content.isEmpty || toolCallsJSON != nil else { continue }
             let id = (obj["id"] as? String) ?? "\(sessionId)-\(index)"
             let timestamp = epochMillisToDate(message["timestamp"])
                 ?? isoDate(obj["timestamp"])
@@ -1018,6 +1406,7 @@ final class OpenClawConversationStore: ConversationStore {
                 model = (raw == "delivery-mirror") ? nil : raw
             }
             messages.append(SimpleMessage(id: id, role: role, content: content,
+                                          functionCallsJSON: toolCallsJSON,
                                           model: model, createdAt: timestamp))
         }
         return messages
@@ -1035,6 +1424,26 @@ final class OpenClawConversationStore: ConversationStore {
             }
         }
         return parts.joined(separator: "\n")
+    }
+
+    /// Pull `tool_use` blocks out of a message `content` array and encode them in
+    /// the canonical `functionCallsJSON` shape (`[{name, arguments, callId}]`) that
+    /// `SimpleConversationManager.messageStruct(from:)` decodes back into
+    /// `MessageStruct.functions`. Returns nil when there are no tool calls.
+    static func extractToolCallsJSON(from content: Any?) -> String? {
+        guard let blocks = content as? [[String: Any]] else { return nil }
+        let calls: [[String: Any]] = blocks.compactMap { block in
+            guard (block["type"] as? String) == "tool_use",
+                  let name = block["name"] as? String else { return nil }
+            var entry: [String: Any] = ["name": name,
+                                        "arguments": (block["input"] as? [String: Any]) ?? [:]]
+            if let callId = block["id"] as? String { entry["callId"] = callId }
+            return entry
+        }
+        guard !calls.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: calls),
+              let string = String(data: data, encoding: .utf8) else { return nil }
+        return string
     }
 
     /// The outcome of an `openclaw agent --json` run, parsed from its run log.

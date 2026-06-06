@@ -130,10 +130,10 @@ final class OpenClawFileStore {
     /// workspace): the check runs shell-side so an oversized file is reported
     /// (and never base64-transferred) in a single round trip. base64 keeps
     /// binary content stream-safe.
-    func read(_ relPath: String) async throws -> Data {
+    func read(_ relPath: String, maxBytes: Int = Workspace.maxFileBytes) async throws -> Data {
         let rel = try validated(relPath)
         let file = pathExpression(rel)
-        let cap = Workspace.maxFileBytes
+        let cap = maxBytes
         // Decide on the VM: emit OVERSIZE:<n> if too big, otherwise the sentinel
         // followed by the base64 body — so we never pull bytes we'll reject.
         let cmd = "sz=$(wc -c < \(file)) && if [ \"$sz\" -gt \(cap) ]; then echo \"OVERSIZE:$sz\"; else echo ===OCSIZE===; base64 \(file); fi"
@@ -154,6 +154,66 @@ final class OpenClawFileStore {
             .replacingOccurrences(of: " ", with: "")
         guard let data = Data(base64Encoded: cleaned) else { throw OpenClawFileError.unreadable }
         return data
+    }
+
+    /// Read a file by an ARBITRARY VM path — absolute (`/…`), home-relative (`~/…`),
+    /// or workspace-relative — bypassing the workspace-containment check `read` uses.
+    /// For rendering an attachment the agent named by full path, which may live
+    /// outside the workspace (e.g. `/home/tony/out/chart.png`). Same size-guarded,
+    /// base64-framed transfer as `read`. The VM is the user's own, so reading a path
+    /// the agent surfaced is within this app's trust model; the size cap still applies.
+    func readAnyPath(_ path: String, maxBytes: Int = Workspace.maxFileBytes) async throws -> Data {
+        let file = Self.shellPathExpression(path, config: config)
+        let cap = maxBytes
+        // `MISSING` distinguishes "no such file" (empty `wc`) from a real read so a
+        // bad guess fails fast instead of returning an empty/garbage body.
+        let cmd = "sz=$(wc -c < \(file) 2>/dev/null); if [ -z \"$sz\" ]; then echo MISSING; elif [ \"$sz\" -gt \(cap) ]; then echo \"OVERSIZE:$sz\"; else echo ===OCSIZE===; base64 \(file); fi"
+        let result = try await run(cmd, timeout: 30)
+        let stdout = result.stdout
+        if stdout.contains("MISSING") { throw OpenClawFileError.unreadable }
+        if let range = stdout.range(of: "OVERSIZE:") {
+            let n = Int(stdout[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)) ?? cap + 1
+            throw OpenClawFileError.fileTooLarge(n)
+        }
+        let parts = stdout.components(separatedBy: "===OCSIZE===")
+        guard parts.count == 2 else { throw OpenClawFileError.unreadable }
+        let cleaned = parts[1]
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        guard let data = Data(base64Encoded: cleaned) else { throw OpenClawFileError.unreadable }
+        return data
+    }
+
+    /// A shell expression for an arbitrary path: expands a leading `~`/`~/` to
+    /// `$HOME`, quotes an absolute path as-is, and treats anything else as
+    /// workspace-relative. Mirrors `workspaceDirExpression`'s tilde handling.
+    static func shellPathExpression(_ path: String, config: OpenClawConfig) -> String {
+        if path == "~" { return "\"$HOME\"" }
+        if path.hasPrefix("~/") {
+            return "\"$HOME\"/" + OpenClawConversationStore.shQuote(String(path.dropFirst(2)))
+        }
+        if path.hasPrefix("/") { return OpenClawConversationStore.shQuote(path) }
+        let base = OpenClawConversationStore.workspaceDirExpression(for: config)
+        return base + "/" + OpenClawConversationStore.shQuote(path)
+    }
+
+    /// Locate the first file matching `name` anywhere under the workspace, returning
+    /// its workspace-relative path (GNU find `-printf '%P'`). Used to resolve a bare
+    /// filename the agent referenced (e.g. `gandalf-engineer-square.png`) to a real
+    /// path for inline media, since the agent rarely says where the file lives.
+    /// Returns nil when nothing matches.
+    func findFile(named name: String) async throws -> String? {
+        guard config.isConfigured else { return nil }
+        let dir = OpenClawConversationStore.workspaceDirExpression(for: config)
+        let q = OpenClawConversationStore.shQuote(name)
+        // `-printf '%P'` prints the path relative to the workspace root; `head -1`
+        // stops at the first hit. Stderr is dropped so a permission-denied dir in a
+        // large tree doesn't pollute the result.
+        let cmd = "find \(dir) -type f -name \(q) -printf '%P\\n' 2>/dev/null | head -1"
+        let result = try await run(cmd, timeout: 20)
+        let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
     }
 
     /// Write bytes to a file, creating parent directories as needed. Throws

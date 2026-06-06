@@ -47,6 +47,20 @@ protocol OnboardingCoordinatorHost: AnyObject {
     /// the last step). The host hides any onboarding-only chrome and lets
     /// the regular chat take over.
     func onboardingDidComplete()
+
+    /// Lock/unlock the chat surface during onboarding. While the scripted flow
+    /// runs, the user answers through the cards, so the host disables the text
+    /// input and the nav-bar controls (settings, speaker, new chat, sidebar)
+    /// plus the attachment button. `input` follows the current step — only the
+    /// `.keyPaste` and `.done` steps allow typing — while `chrome` is false for
+    /// the whole flow and flips true once onboarding completes.
+    func onboardingSetInteractionEnabled(input: Bool, chrome: Bool)
+}
+
+extension OnboardingCoordinatorHost {
+    /// Default no-op so hosts that don't gate their UI during onboarding
+    /// (e.g. the Mac panel) compile without implementing this.
+    func onboardingSetInteractionEnabled(input: Bool, chrome: Bool) {}
 }
 
 /// Events that interactive cards bubble up to the coordinator. The chip /
@@ -186,6 +200,7 @@ final class OnboardingCoordinator {
         // working key and make the greeting inaccurate. Pin Apple only when
         // no hosted key exists.
         if resumed == .greeting {
+            AppSignals.emit("onboarding_started")
             if !ModelProvider.hasAnyProviderKey {
                 pinAppleFoundationModel()
             }
@@ -556,6 +571,9 @@ final class OnboardingCoordinator {
 
     private func complete() {
         OnboardingState.isComplete = true
+        AppSignals.emit("onboarding_completed")
+        // Onboarding is over — hand the full chat surface back to the user.
+        host?.onboardingSetInteractionEnabled(input: true, chrome: true)
         host?.onboardingDidComplete()
     }
 
@@ -571,6 +589,14 @@ final class OnboardingCoordinator {
         let message = makeMessage(for: step)
         lastPostedMessageId = message.id
         host?.onboardingPostMessage(message)
+
+        // Lock the chat chrome for the duration of the scripted flow. Only the
+        // key-paste step needs the keyboard (to paste a provider key); `.done`
+        // unlocks the input pre-emptively so there's no flicker before
+        // `complete()` runs. Nav-bar chrome stays locked until completion.
+        host?.onboardingSetInteractionEnabled(
+            input: step == .keyPaste || step == .done,
+            chrome: false)
     }
 
     /// Mark the last posted bubble as answered (chips collapse) AND append
