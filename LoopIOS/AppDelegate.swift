@@ -52,6 +52,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // sender that would push on agent completion is not built yet.
         PushRegistration.shared.registerIfAuthorized()
 
+        AppSignals.emit("app_launched")
+
         return true
     }
 

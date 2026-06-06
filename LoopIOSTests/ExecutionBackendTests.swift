@@ -485,15 +485,25 @@ final class OpenClawConfigTests: XCTestCase {
         {"type":"session","version":3,"id":"s1","timestamp":"2026-05-31T16:02:51.908Z"}
         {"type":"message","id":"u1","message":{"role":"user","content":[{"type":"text","text":"hi there"}],"timestamp":1780243371000}}
         {"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hello back"}],"model":"gpt-5.2","timestamp":1780243371908}}
-        {"type":"message","id":"t1","message":{"role":"assistant","content":[{"type":"tool_use","name":"bash","input":{}}],"timestamp":1780243372000}}
+        {"type":"message","id":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"bash","input":{"command":"uname -a"}}],"timestamp":1780243372000}}
         """
         let msgs = OpenClawConversationStore.parseSessionTranscript(jsonl, sessionId: "s1")
-        // The session line and the text-less tool_use message are dropped.
-        XCTAssertEqual(msgs.map { $0.id }, ["u1", "a1"])
-        XCTAssertEqual(msgs.map { $0.role }, ["user", "assistant"])
+        // The session line is dropped; the text-less tool_use turn is kept so the
+        // "Used N tools" disclosure renders.
+        XCTAssertEqual(msgs.map { $0.id }, ["u1", "a1", "t1"])
+        XCTAssertEqual(msgs.map { $0.role }, ["user", "assistant", "assistant"])
         XCTAssertEqual(msgs.first?.content, "hi there")
-        XCTAssertEqual(msgs.last?.content, "hello back")
-        XCTAssertEqual(msgs.last?.model, "gpt-5.2")
+        XCTAssertEqual(msgs[1].content, "hello back")
+        XCTAssertEqual(msgs[1].model, "gpt-5.2")
+        // The tool-only turn carries no text but encodes the call in functionCallsJSON.
+        XCTAssertEqual(msgs.last?.content, "")
+        let calls = msgs.last?.functionCallsJSON
+            .flatMap { $0.data(using: .utf8) }
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] }
+        XCTAssertEqual(calls?.count, 1)
+        XCTAssertEqual(calls?.first?["name"] as? String, "bash")
+        XCTAssertEqual(calls?.first?["callId"] as? String, "call_1")
+        XCTAssertEqual((calls?.first?["arguments"] as? [String: Any])?["command"] as? String, "uname -a")
     }
 
     func testParseSessionTranscriptHandlesStringContentAndSkipsBadLines() {

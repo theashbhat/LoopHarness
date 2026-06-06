@@ -19,6 +19,44 @@ import os
 /// Xcode console by filtering on subsystem `com.bhat.intel`, category `SSH`.
 let sshLog = Logger(subsystem: "com.bhat.intel", category: "SSH")
 
+/// A minimal FIFO async semaphore. `wait()` suspends (never blocks a thread)
+/// until a permit is free; `signal()` is a synchronous, non-isolated call so it
+/// can run from a `defer`. Used to cap concurrent OpenClaw CLI commands at one.
+final class AsyncSemaphore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var permits: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(value: Int) { permits = value }
+
+    func wait() async {
+        lock.lock()
+        if permits > 0 {
+            permits -= 1
+            lock.unlock()
+            return
+        }
+        // Enqueue the continuation while still holding the lock so a concurrent
+        // signal() can't slip between the permit check and the append.
+        await withCheckedContinuation { cont in
+            waiters.append(cont)
+            lock.unlock()
+        }
+    }
+
+    func signal() {
+        lock.lock()
+        if waiters.isEmpty {
+            permits += 1
+            lock.unlock()
+        } else {
+            let next = waiters.removeFirst()
+            lock.unlock()
+            next.resume()
+        }
+    }
+}
+
 final class SSHSkill {
 
     static let shared = SSHSkill()
@@ -197,6 +235,30 @@ final class SSHSkill {
             command: command,
             timeout: timeout
         )
+    }
+
+    // MARK: - OpenClaw command serialization
+
+    /// The OpenClaw gateway daemon deadlocks when more than one CLI gateway
+    /// client connects concurrently — verified on a live VM: a single
+    /// `openclaw sessions`/`models` call returns instantly, but two or more
+    /// concurrent invocations all hang for 30 s and the daemon stays wedged
+    /// until restarted. The app's pollers + Settings screens have no shared
+    /// concurrency control, so an in-flight poll overlapping a model fetch was
+    /// enough to wedge it. Every `openclaw` CLI command issued over SSH funnels
+    /// through this process-wide limit-1 gate so only one is ever in flight,
+    /// making that deadlock structurally impossible.
+    private static let openClawGate = AsyncSemaphore(value: 1)
+
+    /// Run an `openclaw` CLI command over SSH under the global serializer. Use
+    /// this — not `runCommand` — for anything that shells out `openclaw` on the
+    /// VM. Plain filesystem reads (`tail`/`base64`/`[ -e ]`) don't touch the
+    /// daemon and should keep using `runCommand` so they aren't serialized
+    /// behind it.
+    func runOpenClawCommand(_ command: String, on config: SSHConfig, timeout: Double = 30) async throws -> CommandResult {
+        await Self.openClawGate.wait()
+        defer { Self.openClawGate.signal() }
+        return try await runCommand(command, on: config, timeout: timeout)
     }
 
     // MARK: - NIOSSH connection

@@ -117,7 +117,7 @@ struct OpenClawSettingsService {
     /// a short alias (both accepted by `openclaw models set`).
     func setDefaultModel(_ modelOrAlias: String) async throws {
         let cmd = "\(Self.pathPrefix) openclaw models set \(Self.shQuote(modelOrAlias))"
-        let result = try await SSHSkill.shared.runCommand(cmd, on: config.sshConfig, timeout: 30)
+        let result = try await SSHSkill.shared.runOpenClawCommand(cmd, on: config.sshConfig, timeout: 30)
         guard result.exitCode == 0 else {
             throw OpenClawSettingsError.commandFailed(
                 trimmedDetail(result.stderr.isEmpty ? result.stdout : result.stderr))
@@ -250,7 +250,7 @@ struct OpenClawSettingsService {
     /// `openclaw … --json` subcommands print to stdout, but some (e.g. `tasks`)
     /// print to stderr — so prefer the stream that actually contains an object.
     private func run(_ command: String) async throws -> String {
-        let result = try await SSHSkill.shared.runCommand(command, on: config.sshConfig, timeout: 30)
+        let result = try await SSHSkill.shared.runOpenClawCommand(command, on: config.sshConfig, timeout: 30)
         if result.stdout.contains("{") { return result.stdout }
         if result.stderr.contains("{") { return result.stderr }
         return result.stdout

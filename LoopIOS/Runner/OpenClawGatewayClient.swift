@@ -101,6 +101,21 @@ enum OpenClawGatewayError: LocalizedError {
     }
 }
 
+// MARK: - Single-shot continuation
+
+/// Wraps a `CheckedContinuation` so it can be resumed at most once — any later
+/// resume is a no-op instead of a fatal "resumed more than once" trap. The
+/// gateway has the same hazard SSHSkill's `SingleResume` guards against: a
+/// `task.send` error callback, a `receive` failure, and `close()` can all
+/// converge on the same in-flight request during a disconnect. Confined to the
+/// client's serial `q`, so the plain optional needs no locking.
+private final class OneShotContinuation {
+    private var cont: CheckedContinuation<[String: Any], Error>?
+    init(_ cont: CheckedContinuation<[String: Any], Error>) { self.cont = cont }
+    func resume(returning value: [String: Any]) { cont?.resume(returning: value); cont = nil }
+    func resume(throwing error: Error) { cont?.resume(throwing: error); cont = nil }
+}
+
 // MARK: - Client
 
 /// `@unchecked Sendable`: all mutable state is confined to the serial `q`; the
@@ -139,8 +154,8 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
     // State (all access on `q`)
     private let q = DispatchQueue(label: "loop.openclaw.gateway")
     private var reqCounter = 0
-    private var pending: [String: CheckedContinuation<[String: Any], Error>] = [:]
-    private var connectContinuation: CheckedContinuation<[String: Any], Error>?
+    private var pending: [String: OneShotContinuation] = [:]
+    private var connectContinuation: OneShotContinuation?
     private var deviceToken: String?
     private var currentRunId: String?
     /// Session keys this connection has already subscribed to. One warm
@@ -166,6 +181,10 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
 
     // Streaming output. Fire on `q` (off-main) — hop to main before touching UI.
     var onAssistantText: ((String) -> Void)?
+    /// Fires when the agent invokes a tool mid-turn (name + optional call id +
+    /// decoded input). May fire repeatedly for the same `callId` if the daemon
+    /// streams the input cumulatively — the consumer should dedupe by `callId`.
+    var onToolCall: ((_ name: String, _ callId: String?, _ input: [String: Any]) -> Void)?
     var onTurnComplete: (() -> Void)?
     var onError: ((Error) -> Void)?
 
@@ -246,6 +265,50 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
     func listSessions() async throws -> [[String: Any]] {
         let payload = try await req("sessions.list", [:])
         return (payload["sessions"] as? [[String: Any]]) ?? []
+    }
+
+    // MARK: - Artifacts (agent-produced media)
+
+    /// Lists the transcript-derived artifacts a run produced (`{name, mimeType,
+    /// size, url, kind}` per the protocol docs). Used to surface images the agent
+    /// "sent" back, which the text-only `agent` stream doesn't carry. The live
+    /// payload shape is UNCONFIRMED (the docs point at the unpublished
+    /// `frames.ts`), so parse tolerantly and log the keys to discover it — mirrors
+    /// how tool-call frames were reverse-engineered. Best effort: callers treat a
+    /// throw / empty list as "no artifacts".
+    func listArtifacts(runId: String) async throws -> [[String: Any]] {
+        let payload = try await req("artifacts.list", ["runId": runId])
+        let items = (payload["artifacts"] as? [[String: Any]])
+            ?? (payload["items"] as? [[String: Any]])
+            ?? (payload["results"] as? [[String: Any]]) ?? []
+        Self.log.debug("artifacts.list runId=\(runId, privacy: .public) count=\(items.count) payloadKeys=\(payload.keys.joined(separator: ","), privacy: .public)")
+        return items
+    }
+
+    /// Downloads one artifact's bytes. `entry` is a row from `listArtifacts`; we
+    /// pass through whatever identifiers it carries (name/url/id) alongside the run
+    /// scope, and decode base64 from `bytes`/`base64`/`data`. Returns nil when the
+    /// response carries no decodable body (shape-tolerant, logs the keys).
+    func downloadArtifact(runId: String, entry: [String: Any]) async throws -> Data? {
+        var params: [String: Any] = ["runId": runId]
+        if let name = entry["name"] as? String { params["name"] = name }
+        if let url = entry["url"] as? String { params["url"] = url }
+        if let id = (entry["id"] as? String) ?? (entry["artifactId"] as? String) { params["artifactId"] = id }
+        let payload = try await req("artifacts.download", params)
+        let raw = (payload["bytes"] as? String) ?? (payload["base64"] as? String) ?? (payload["data"] as? String)
+        guard let raw = raw, let data = Data(base64Encoded: Self.stripBase64(raw)) else {
+            Self.log.debug("artifacts.download no decodable bytes; payloadKeys=\(payload.keys.joined(separator: ","), privacy: .public)")
+            return nil
+        }
+        return data
+    }
+
+    /// Strip a `data:<mime>;base64,` prefix and any whitespace/newlines so a
+    /// base64 string from JSON (or a data URL) decodes cleanly.
+    private static func stripBase64(_ s: String) -> String {
+        var body = s
+        if let comma = body.range(of: ";base64,") { body = String(body[comma.upperBound...]) }
+        return body.filter { !$0.isWhitespace }
     }
 
     /// Subscribes this connection to a session's event stream if it hasn't
@@ -340,7 +403,7 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
     /// resolves with the `hello-ok` payload.
     private func performConnect() async throws -> [String: Any] {
         try await withCheckedThrowingContinuation { cont in
-            q.async { self.connectContinuation = cont }
+            q.async { self.connectContinuation = OneShotContinuation(cont) }
         }
     }
 
@@ -399,7 +462,11 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
         connection?.close()
         task = nil; urlSession = nil; forwarder = nil; connection = nil
         q.sync {
+            // Resume-then-clear so a continuation in flight when we tear down to
+            // retry doesn't leak (the OneShot makes a later real resume a no-op).
+            self.connectContinuation?.resume(throwing: OpenClawGatewayError.notConnected)
             self.connectContinuation = nil
+            for (_, cont) in self.pending { cont.resume(throwing: OpenClawGatewayError.notConnected) }
             self.pending.removeAll()
             self.connected = false
         }
@@ -413,7 +480,7 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
                 guard !self.isClosed else { cont.resume(throwing: OpenClawGatewayError.notConnected); return }
                 self.reqCounter += 1
                 let id = String(self.reqCounter)
-                self.pending[id] = cont
+                self.pending[id] = OneShotContinuation(cont)
                 self.sendString(["type": "req", "id": id, "method": method, "params": params])
             }
         }
@@ -495,16 +562,70 @@ final class OpenClawGatewayClient: NSObject, @unchecked Sendable {
             guard let cur = currentRunId, (payload["runId"] as? String) == cur else { break }
             let stream = payload["stream"] as? String
             let dataObj = payload["data"] as? [String: Any] ?? [:]
-            if stream == "assistant" {
+            switch stream {
+            case "assistant":
                 // Cumulative reply text — replace semantics.
                 if let text = dataObj["text"] as? String { onAssistantText?(text) }
-            } else if stream == "lifecycle", (dataObj["phase"] as? String) == "end" {
-                currentRunId = nil
-                onTurnComplete?()
+            case "lifecycle":
+                // TEMP(tooldiag): log lifecycle phases so we see the full frame set.
+                Self.log.info("TOOLDIAG gw agent stream=lifecycle data=\(Self.dump(dataObj), privacy: .public)")
+                if (dataObj["phase"] as? String) == "end" {
+                    currentRunId = nil
+                    onTurnComplete?()
+                }
+            default:
+                // Tool-use frames arrive on a non-assistant stream. The exact
+                // stream label varies by daemon build, so recognize them
+                // structurally (a tool name + its input) rather than by a hard
+                // -coded label; tool *results* are ignored — we surface only the
+                // calls. The transcript backstop (parseSessionTranscript) is the
+                // source of truth, so a missed frame here is corrected at finalize.
+                // TEMP(tooldiag): log the full payload so we can learn the real
+                // tool-event shape (stream label + data schema) from a live turn.
+                Self.log.info("TOOLDIAG gw agent stream=\(stream ?? "nil", privacy: .public) data=\(Self.dump(dataObj), privacy: .public)")
+                emitToolCallIfPresent(data: dataObj)
             }
         default:
             break
         }
+    }
+
+    /// Best-effort extraction of a `tool_use` call from an `agent` event's `data`,
+    /// tolerant of where the block sits (top level / `block` / `content[]`) and of
+    /// key spelling (`input`/`arguments`/`args`, `id`/`toolUseId`/`callId`). Emits
+    /// `onToolCall` for each tool call found; ignores frames with no tool name and
+    /// explicit tool-result blocks.
+    private func emitToolCallIfPresent(data: [String: Any]) {
+        let candidates: [[String: Any]]
+        if let block = data["block"] as? [String: Any] {
+            candidates = [block]
+        } else if let blocks = data["content"] as? [[String: Any]] {
+            candidates = blocks
+        } else {
+            candidates = [data]
+        }
+        for obj in candidates {
+            if let type = obj["type"] as? String {
+                // Skip non-tool blocks (text/thinking) and tool *results*.
+                guard type == "tool_use" || (type.contains("tool") && !type.contains("result")) else { continue }
+            }
+            guard let name = (obj["name"] as? String) ?? (obj["toolName"] as? String) ?? (obj["tool"] as? String),
+                  !name.isEmpty else { continue }
+            let input = (obj["input"] as? [String: Any])
+                ?? (obj["arguments"] as? [String: Any])
+                ?? (obj["args"] as? [String: Any]) ?? [:]
+            let callId = (obj["id"] as? String) ?? (obj["toolUseId"] as? String) ?? (obj["callId"] as? String)
+            Self.log.info("TOOLDIAG emit tool name=\(name, privacy: .public) callId=\(callId ?? "nil", privacy: .public)")
+            onToolCall?(name, callId, input)
+        }
+    }
+
+    /// TEMP(tooldiag): compact JSON dump of a payload for logging.
+    private static func dump(_ obj: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(obj),
+              let d = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: d, encoding: .utf8) else { return "\(obj)" }
+        return s
     }
 
     // MARK: - Errors

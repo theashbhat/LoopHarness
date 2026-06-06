@@ -10,6 +10,8 @@ Secrets.xcconfig
 *.pem
 *.key
 
+LoopIOS/Private/
+
 # ─── Xcode / build ────────────────────────────────────────────────────
 build/
 DerivedData/

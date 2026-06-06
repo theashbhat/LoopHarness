@@ -1167,6 +1167,33 @@ class MessageBox: UIView {
 
 }
 
+extension MessageBox {
+    /// Onboarding gate. While the scripted flow runs we lock the input bar so
+    /// the user answers through the cards (chips) instead of typing — the
+    /// `.keyPaste` step re-enables it so a key can be pasted, and onboarding
+    /// completion restores it for the real chat. Disables editing + the mic
+    /// button, resigns the keyboard, dims the bar, and swaps the placeholder to
+    /// a hint. The attachment button is gated separately (`setAttachmentEnabled`)
+    /// so it stays off for the whole flow even on the key-paste step.
+    func setInputEnabled(_ enabled: Bool, placeholder: String = "Ask anything") {
+        textView.isEditable = enabled
+        containerView.isUserInteractionEnabled = enabled
+        micButton.isEnabled = enabled
+        containerView.alpha = enabled ? 1.0 : 0.5
+        micButton.alpha = enabled ? 1.0 : 0.5
+        emptyLabel.text = placeholder
+        if !enabled { textView.resignFirstResponder() }
+    }
+
+    /// Enable/disable just the attachment (camera/files) button. Kept apart
+    /// from `setInputEnabled` so onboarding can leave it disabled for the
+    /// entire flow while still allowing typing on the key-paste step.
+    func setAttachmentEnabled(_ enabled: Bool) {
+        attachButton.isEnabled = enabled
+        attachButton.alpha = enabled ? 1.0 : 0.5
+    }
+}
+
 extension MessageBox: UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) {
         emptyLabel.isHidden = textView.text.count > 0

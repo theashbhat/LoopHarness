@@ -313,17 +313,35 @@ struct FileAttachment: Codable {
     /// fenced markers so the model can answer questions about the file
     /// without needing a tool call.
     var assistantHint: String {
-        let kindLabel: String
-        switch kind {
-        case .pdf:      kindLabel = "PDF"
-        case .image:    kindLabel = "image"
-        case .markdown: kindLabel = "markdown"
-        case .text:     kindLabel = languageTag.map { "\($0) source" } ?? "text"
-        case .generic:  kindLabel = "file"
-        }
         let workspaceRelative = fileURL.lastPathComponent
-        let header = "[Attached file: \(fileName) (\(kindLabel)) at workspace://attachments/\(workspaceRelative)]"
+        return hint(header: "[Attached file: \(fileName) (\(kindLabel)) at workspace://attachments/\(workspaceRelative)]")
+    }
 
+    /// Variant of `assistantHint` for the OpenClaw remote backend, where the file
+    /// has been uploaded to the VM's workspace at `workspaceRelPath` (e.g.
+    /// `attachments/<id>-photo.jpg`). Points the agent at the real on-disk path so
+    /// it can open/read the file with its own filesystem tools (the only way it can
+    /// "see" an image), and inlines extracted text for PDFs/markdown/source exactly
+    /// like the local variant. See `OpenClawConversationStore.prepareRemoteAttachment`.
+    func remoteHint(workspaceRelPath: String) -> String {
+        hint(header: "[Attached file: \(fileName) (\(kindLabel)) — saved in your workspace at \(workspaceRelPath). Open/read it to view its contents.]")
+    }
+
+    /// Short label for this attachment's kind, used in the hint header.
+    private var kindLabel: String {
+        switch kind {
+        case .pdf:      return "PDF"
+        case .image:    return "image"
+        case .markdown: return "markdown"
+        case .text:     return languageTag.map { "\($0) source" } ?? "text"
+        case .generic:  return "file"
+        }
+    }
+
+    /// Builds a hint from a backend-specific `header`, appending the (truncated)
+    /// extracted text between fenced markers when we have any. Shared by
+    /// `assistantHint` (local `workspace://` path) and `remoteHint` (real VM path).
+    private func hint(header: String) -> String {
         guard let text = extractedText, !text.isEmpty else {
             return header
         }

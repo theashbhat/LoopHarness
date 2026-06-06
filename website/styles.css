@@ -72,8 +72,8 @@ em { font-style: italic; }
   font-weight: 500;
 }
 .nav__brand-orb {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #f0e9d6, #6b6557 70%, #1a1814 100%);
+  display: block;
+  width: 22px; height: 22px;
 }
 .nav__links {
   display: flex; gap: 28px; opacity: 0.78;
@@ -204,14 +204,50 @@ em { font-style: italic; }
   background: var(--accent);
   color: var(--ink);
 }
+/* Voice "lines" — an audio waveform that mirrors the app's recording state.
+   Collapsed to zero width at rest; springs open the moment the hold starts
+   (is-recording) and then folds away once the orb takes over the talking
+   state (is-talking). Bars are built in site.js so delays can be staggered. */
+.hold-strip__wave {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 18px;
+  width: 0;
+  overflow: hidden;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: width 0.28s ease, opacity 0.28s ease;
+}
+.hold-strip.is-recording .hold-strip__wave {
+  width: 78px;
+  opacity: 1;
+}
+.hold-strip.is-talking .hold-strip__wave {
+  width: 0;
+  opacity: 0;
+}
+.hold-strip__wave span {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--off);
+  transform: scaleY(0.22);
+  animation: hold-wave 0.9s ease-in-out infinite;
+}
+@keyframes hold-wave {
+  0%, 100% { transform: scaleY(0.2); }
+  50%      { transform: scaleY(1); }
+}
 .hold-strip__txt {
   flex: 1;
+  min-width: 0;
   color: rgba(233, 228, 216, 0.45);
   font-size: 13px;
   text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.5;
+  white-space: normal;       /* wrap the transcript instead of clipping it */
+  overflow-wrap: break-word;
 }
 .hold-strip.is-holding .hold-strip__txt { color: var(--off); }
 .hold-strip__dot {
@@ -221,6 +257,10 @@ em { font-style: italic; }
   flex-shrink: 0;
 }
 .hold-strip.is-holding .hold-strip__dot { background: #ff5f57; }
+.hold-strip.is-talking .hold-strip__dot {
+  background: rgb(51, 199, 255); /* systemCyan — matches the orb's talking state */
+  box-shadow: 0 0 8px rgba(51, 199, 255, 0.7);
+}
 
 /* ────────── surfaces ────────── */
 
@@ -735,8 +775,8 @@ em { font-style: italic; }
   display: flex; align-items: center; gap: 14px;
 }
 .foot__orb {
-  width: 18px; height: 18px; border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #f0e9d6, #6b6557 70%, #1a1814 100%);
+  display: block;
+  width: 18px; height: 18px;
 }
 .foot__brand { color: var(--off); }
 .foot__by    { color: #555; }

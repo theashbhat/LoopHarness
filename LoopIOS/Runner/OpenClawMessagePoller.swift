@@ -67,6 +67,15 @@ final class OpenClawMessagePoller {
 
     private var foregroundTimer: DispatchSourceTimer?
 
+    /// True while a `pollAllBackends()` pass is still awaiting its per-backend
+    /// session-list callbacks. Guards against overlapping ticks: each `openclaw`
+    /// SSH command is serialized daemon-side (and can take up to 30 s to time
+    /// out), while the foreground timer fires every 25 s and the background
+    /// grace timer every 8 s. Without this, ticks would queue up faster than
+    /// they drain — the runaway background-task pile-up. A still-running pass
+    /// means a new tick has nothing to add, so we drop it.
+    private var pollInFlight = false
+
     /// Notification ids already posted this process, so the same advance polled
     /// twice before the cursor persists can't double-fire.
     private var notifiedKeys: Set<String> = []
@@ -224,30 +233,35 @@ final class OpenClawMessagePoller {
         }
         guard !backends.isEmpty else { return }
 
+        // Drop this tick if the previous pass is still draining its per-backend
+        // session-list callbacks — overlapping passes only pile up SSH commands
+        // (each serialized + up-to-30s) against a timer that fires far sooner.
+        lock.lock()
+        guard !pollInFlight else { lock.unlock(); return }
+        pollInFlight = true
+        lock.unlock()
+
         #if os(iOS)
         let app = UIApplication.shared
         let taskId = app.beginBackgroundTask(withName: "loop.openclaw.poll") {}
-        let group = DispatchGroup()
         #endif
+        let group = DispatchGroup()
 
         for backend in backends {
             guard let store = SimpleConversationManager.shared.remoteStore(for: backend.id) else { continue }
-            #if os(iOS)
             group.enter()
-            #endif
             store.listSessionsForPoll { [weak self] sessions in
                 self?.handleSessionList(sessions, backend: backend, store: store)
-                #if os(iOS)
                 group.leave()
-                #endif
             }
         }
 
-        #if os(iOS)
-        group.notify(queue: .global()) {
+        group.notify(queue: .global()) { [weak self] in
+            self?.lock.lock(); self?.pollInFlight = false; self?.lock.unlock()
+            #if os(iOS)
             if taskId != .invalid { app.endBackgroundTask(taskId) }
+            #endif
         }
-        #endif
     }
 
     /// Compare a backend's freshly-listed sessions against the stored cursors and

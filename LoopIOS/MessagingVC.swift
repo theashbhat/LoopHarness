@@ -94,6 +94,13 @@ class MessagingVC: UIViewController {
     /// `processMessage` append stay untouched: when the full response lands
     /// this is cleared and the placeholder is replaced by the real bubble.
     private var streamingPartial = ""
+    /// Tool calls the agent made during the in-flight turn (OpenClaw Gateway),
+    /// rendered live in the trailing placeholder cell's "Used N tools"
+    /// disclosure. Cleared alongside `streamingPartial` when the turn finishes.
+    private var streamingToolCalls: [FunctionCallStruct] = []
+    /// Stable id for the transient streaming bubble so its tool disclosure keeps
+    /// its expanded state across the per-delta re-renders.
+    private let streamingMessageId = "__loop_streaming__"
     /// True once any delta has arrived this turn, so the final bubble can
     /// skip the type-on reveal for text the user already watched stream in.
     private var streamedCurrentTurn = false
@@ -145,7 +152,11 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     // the hamburger button; cleared when the user opens the side drawer.
     private var unreadConversationIds: Set<String> = []
     private weak var menuBadgeDot: UIView?
-    
+    // Footer bar filling the area below the safe area (the home-indicator strip),
+    // showing the active execution backend's name; tapping it opens a picker.
+    // Kept weak so it can be refreshed when the selected backend changes.
+    private weak var backendIndicatorButton: UIButton?
+
     // Edge pan gesture tracking
     private var isEdgePanActive = false
     private var edgePanStartLocation: CGPoint = .zero
@@ -175,6 +186,23 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     private var currentSpeechMessageId: String?
     private var speechBuffer: String = ""
     private var muteButton: UIBarButtonItem?
+    /// Nav-bar controls captured so onboarding can lock them while the scripted
+    /// flow runs (see `onboardingSetInteractionEnabled`). The hamburger is a
+    /// custom-view button so we hold the `UIButton` to toggle its enabled state.
+    private weak var sidebarMenuButton: UIButton?
+    private var newChatBarButton: UIBarButtonItem?
+    private var settingsBarButton: UIBarButtonItem?
+
+    /// Composed chrome state. The two locks below are resolved together in
+    /// `applyChromeState()` so neither clobbers the other:
+    ///   - onboarding lock: disables all chrome while the scripted flow runs.
+    ///   - store-loading lock: disables only the store-dependent buttons
+    ///     (sidebar list + new-chat) until ConversationFileStore finishes its
+    ///     off-main bootstrap. Settings/speaker stay live; input stays live.
+    private var isOnboardingChromeEnabled = true
+    private var isConversationStoreLoading = false
+    /// Spinner shown over the sidebar (hamburger) button while the store loads.
+    private weak var sidebarLoadingSpinner: UIActivityIndicatorView?
 
     // Streaming TTS (Deepgram Aura-2). Used when DEEPGRAM_API_KEY is configured;
     // falls back to AVSpeechSynthesizer when missing or on connection failure.
@@ -445,8 +473,19 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         self.setupUI()
         self.setupEdgePanGesture()
         
-        // Load last conversation and messages
-        loadLastConversation()
+        // Load last conversation and messages — WITHOUT blocking launch on
+        // iCloud. ConversationFileStore bootstraps off the main thread, so on a
+        // cold start its cache is still empty here. Render the default empty
+        // chat immediately (the "basic runtime" is interactive at once), gate
+        // the store-dependent buttons, and swap in the real last conversation
+        // when the store signals ready.
+        if ConversationFileStore.shared.isReady {
+            loadLastConversation()
+        } else {
+            loadDefaultMessage()
+            setConversationChromeLoading(true)
+            observeConversationStoreReady()
+        }
 
         // Hook the conversational onboarding flow. The coordinator no-ops
         // when `OnboardingState.isComplete` is true, so existing users see
@@ -546,6 +585,26 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             self,
             selector: #selector(handleOpenClawMessageArrived(_:)),
             name: .openClawMessageDidArrive,
+            object: nil
+        )
+
+        // A gateway turn's tool calls were reconciled from the transcript after
+        // the reply landed (the live stream surfaced none) — reload the open chat
+        // so the "Used N tools" disclosure appears in place.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOpenClawToolCallsReconciled(_:)),
+            name: .openClawToolCallsDidReconcile,
+            object: nil
+        )
+
+        // A gateway turn produced image media (a transcript artifact or a
+        // workspace file the agent referenced) that the store fetched and appended
+        // as standalone image bubble(s) — reload the open chat to show them.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOpenClawMediaDidAttach(_:)),
+            name: .openClawMediaDidAttach,
             object: nil
         )
 
@@ -653,6 +712,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     /// its most recent conversation. Cancel any in-flight VM poll first — its
     /// conversation belongs to the backend we're leaving.
     @objc private func handleExecutionBackendChanged() {
+        updateBackendIndicator()
         cancelRemotePoll()
         activeRequestConversationId = nil
         ai_state = .None
@@ -664,6 +724,28 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             conversationManager.clearCurrentConversation()
             loadDefaultMessage()
         }
+    }
+
+    /// One-shot: when the store finishes its off-main bootstrap, drop the
+    /// loading lock and load the last conversation — unless the user already
+    /// started one (typed/created/opened a chat) while we were loading, in
+    /// which case we leave their in-progress chat alone.
+    private func observeConversationStoreReady() {
+        var token: NSObjectProtocol?
+        let onReady: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            if let token = token { NotificationCenter.default.removeObserver(token) }
+            self.setConversationChromeLoading(false)
+            if self.currentConversationEntity == nil {
+                self.loadLastConversation()
+            }
+        }
+        token = NotificationCenter.default.addObserver(
+            forName: .conversationStoreDidBecomeReady,
+            object: nil, queue: .main) { _ in onReady() }
+        // Guard the check-then-register race: the store may have flipped ready
+        // between viewDidLoad's `isReady` test and this observer registering.
+        if ConversationFileStore.shared.isReady { onReady() }
     }
 
     private func loadLastConversation() {
@@ -1166,6 +1248,8 @@ extension MessagingVC: MessageBoxDelegate {
         // Add message to conversation
         conversationManager.addMessage(messageStruct, to: conversation)
 
+        AppSignals.emit("message_sent", ["length": message.count])
+
         // Update local conversation reference
         currentConversationEntity = conversationManager.currentConversation
 
@@ -1200,7 +1284,7 @@ extension MessagingVC: MessageBoxDelegate {
             if OpenClawConversationStore.useGatewayWS {
                 // Warm persistent Gateway session — stream the reply into the
                 // bubble (replaces the cold CLI poll; ~4s vs ~16s).
-                self.sendRemoteGatewayTurn(text: message, conversationId: requestConversationId)
+                self.sendRemoteGatewayTurn(text: message, attachment: stagedAttachment, conversationId: requestConversationId)
             } else {
                 self.startRemotePoll(conversationId: requestConversationId)
             }
@@ -1406,7 +1490,27 @@ extension MessagingVC: MessageBoxDelegate {
     /// before each `Cloud.connection.chat` so the placeholder starts empty.
     private func beginStreamingTurn() {
         streamingPartial = ""
+        streamingToolCalls = []
         streamedCurrentTurn = false
+    }
+
+    /// Record a tool call the agent made this turn (main thread) and schedule a
+    /// coalesced render so the live "Used N tools" disclosure updates. Dedupes by
+    /// `callId` so a cumulatively-streamed call updates in place.
+    private func addStreamingToolCall(_ call: FunctionCallStruct) {
+        if let callId = call.callId,
+           let idx = streamingToolCalls.firstIndex(where: { $0.callId == callId }) {
+            streamingToolCalls[idx] = call
+        } else {
+            streamingToolCalls.append(call)
+        }
+        guard !streamRenderScheduled else { return }
+        streamRenderScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.streamRenderScheduled = false
+            self.renderStreamingPartial()
+        }
     }
 
     /// Append a delta (main thread) and schedule a coalesced render.
@@ -1426,7 +1530,10 @@ extension MessagingVC: MessageBoxDelegate {
     /// partial text, growing its height via begin/endUpdates rather than a
     /// full reload (which would dump scroll position and restart animations).
     private func renderStreamingPartial() {
-        guard ai_state != .None, !streamingPartial.isEmpty else { return }
+        // Render when there's partial text OR a tool call to show — a tool-only
+        // step (agent invoked a tool before emitting any text) must still surface
+        // the "Used N tools" disclosure.
+        guard ai_state != .None, !streamingPartial.isEmpty || !streamingToolCalls.isEmpty else { return }
         // This render is dispatched async (appendStreamingDelta), and several
         // code paths mutate `self.messages` synchronously but defer their
         // `reloadData()` to a later runloop. If such a mutation has landed but
@@ -1443,9 +1550,11 @@ extension MessagingVC: MessageBoxDelegate {
         }
         let ip = IndexPath(row: visible_messages.count, section: 0)
         guard let cell = tableView.cellForRow(at: ip) as? MessagingCell else { return }
-        let partial = MessageStruct(role: "assistant",
+        var partial = MessageStruct(id: streamingMessageId, role: "assistant",
                                     content: streamingPartial,
                                     model: ModelSelectionStore.current.stampedMessageModel)
+        partial.functions = streamingToolCalls
+        configureToolDisclosure(for: cell, message: partial)
         cell.setData(data: partial, shouldAnimate: false)
         // Only auto-follow if the user is already pinned near the bottom, so
         // streaming doesn't yank the view while they're scrolled up reading.
@@ -1465,9 +1574,16 @@ extension MessagingVC: MessageBoxDelegate {
     /// Drive a remote turn over the persistent Gateway session. Reuses the same
     /// streaming bubble as local inference: `onDelta` feeds `streamingPartial`;
     /// the completion finalizes by appending the persisted assistant message.
-    private func sendRemoteGatewayTurn(text: String, conversationId: String) {
+    private func sendRemoteGatewayTurn(text: String, attachment: FileAttachment? = nil, conversationId: String) {
         let onPartial = streamingPartialHandler(for: conversationId)
-        conversationManager.sendRemoteStreaming(text: text, conversationId: conversationId, onDelta: onPartial) { [weak self] result in
+        let onTool: (FunctionCallStruct) -> Void = { [weak self] call in
+            DispatchQueue.main.async {
+                guard let self = self,
+                      self.currentConversationEntity?.id == conversationId else { return }
+                self.addStreamingToolCall(call)
+            }
+        }
+        conversationManager.sendRemoteStreaming(text: text, attachment: attachment, conversationId: conversationId, onDelta: onPartial, onToolCall: onTool) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 ActiveRequestTracker.shared.markIdle(conversationId)
@@ -1477,6 +1593,7 @@ extension MessagingVC: MessageBoxDelegate {
                     guard isViewing else { self.markConversationUnread(conversationId); return }
                     self.ai_state = .None
                     self.streamingPartial = ""
+                    self.streamingToolCalls = []
                     self.messages.append(msg)
                     AgentActivityLog.shared.setAssistantTranscript(msg.content)
                     VoiceLoopCoordinator.shared.publishAcknowledgePulse()
@@ -1499,6 +1616,7 @@ extension MessagingVC: MessageBoxDelegate {
                     guard isViewing else { return }
                     self.ai_state = .None
                     self.streamingPartial = ""
+                    self.streamingToolCalls = []
                     let notice = MessageStruct(role: "assistant",
                         content: "⚠️ Couldn't reach the agent: \(error.localizedDescription)")
                     self.messages.append(notice)
@@ -2153,7 +2271,8 @@ extension MessagingVC {
 
         let sideBarButton = UIBarButtonItem(customView: menuButton)
         self.navigationItem.leftBarButtonItems = [sideBarButton]
-        
+        self.sidebarMenuButton = menuButton
+
         // Right bar buttons: speaker (now opens a settings menu) + edit.
         // Gear + speaker land in a system-grouped pill, which dims their
         // tint compared to the standalone hamburger/edit circles — bump
@@ -2180,6 +2299,117 @@ extension MessagingVC {
 
         // Order: edit (leading), speaker, settings (trailing).
         self.navigationItem.rightBarButtonItems = [editButton, muteButton!, settingsButton]
+        self.newChatBarButton = editButton
+        self.settingsBarButton = settingsButton
+
+        // Lock the chrome up front if onboarding hasn't finished yet, so the
+        // controls don't flash enabled for the beat before `resumeIfNeeded()`
+        // posts the first scripted step.
+        if !OnboardingState.isComplete {
+            setOnboardingChromeEnabled(false)
+            messageBox.setInputEnabled(false, placeholder: "Tap an option above")
+        }
+    }
+
+    /// Enable/disable the nav-bar controls and the attachment button while the
+    /// onboarding flow is running. Driven by the coordinator via
+    /// `onboardingSetInteractionEnabled`; also applied once up front in
+    /// `setupNav` so there's no enabled-then-disabled flash on launch.
+    private func setOnboardingChromeEnabled(_ enabled: Bool) {
+        isOnboardingChromeEnabled = enabled
+        applyChromeState()
+    }
+
+    /// Toggle the launch-time loading lock that disables only the buttons whose
+    /// actions need conversation data (the sidebar list + new-chat). Shows a
+    /// spinner on the sidebar button while active. Settings/speaker and the
+    /// message input stay usable so a fresh chat works immediately.
+    func setConversationChromeLoading(_ loading: Bool) {
+        isConversationStoreLoading = loading
+        setSidebarSpinnerActive(loading)
+        applyChromeState()
+    }
+
+    /// Single resolver for nav-bar chrome enablement. ANDs the onboarding lock
+    /// (gates everything) with the store-loading lock (gates only the
+    /// store-dependent buttons) so the two never overwrite each other.
+    private func applyChromeState() {
+        let onboard = isOnboardingChromeEnabled
+        let storeReady = !isConversationStoreLoading
+        sidebarMenuButton?.isEnabled = onboard && storeReady
+        newChatBarButton?.isEnabled = onboard && storeReady
+        // Store-independent — only the onboarding lock applies.
+        muteButton?.isEnabled = onboard
+        settingsBarButton?.isEnabled = onboard
+        // The attachment button rides with the chrome lock (not the input
+        // lock) so it stays disabled even on the key-paste step.
+        messageBox.setAttachmentEnabled(onboard)
+    }
+
+    /// Show/hide a small activity indicator centered over the sidebar
+    /// (hamburger) button. Hides the button's icon + unread dot while spinning
+    /// and restores them when done.
+    private func setSidebarSpinnerActive(_ active: Bool) {
+        guard let button = sidebarMenuButton else { return }
+        if active {
+            button.imageView?.alpha = 0
+            menuBadgeDot?.isHidden = true
+            let spinner = sidebarLoadingSpinner ?? {
+                let s = UIActivityIndicatorView(style: .medium)
+                s.hidesWhenStopped = true
+                s.translatesAutoresizingMaskIntoConstraints = false
+                button.addSubview(s)
+                NSLayoutConstraint.activate([
+                    s.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                    s.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                ])
+                sidebarLoadingSpinner = s
+                return s
+            }()
+            spinner.startAnimating()
+        } else {
+            sidebarLoadingSpinner?.stopAnimating()
+            button.imageView?.alpha = 1
+            // Restore the unread dot to whatever the current unread state wants.
+            menuBadgeDot?.isHidden = unreadConversationIds.isEmpty
+        }
+    }
+
+    /// Refreshes the navbar backend indicator's title and picker menu so it
+    /// tracks the currently selected backend (and any added/renamed backends).
+    func updateBackendIndicator() {
+        guard let button = backendIndicatorButton else { return }
+        button.setTitle(ExecutionBackendStore.shared.selectedBackend.displayName, for: .normal)
+        button.menu = buildBackendMenu()
+    }
+
+    /// Picker menu listing every backend (Local first, then remotes) with a
+    /// checkmark on the selected one, plus a "Manage backends…" escape hatch.
+    private func buildBackendMenu() -> UIMenu {
+        let store = ExecutionBackendStore.shared
+        let selectedID = store.selectedBackendID
+        let backendActions = store.backends.map { backend in
+            UIAction(
+                title: backend.displayName,
+                state: backend.id == selectedID ? .on : .off
+            ) { _ in
+                ExecutionBackendStore.shared.select(id: backend.id)
+            }
+        }
+        let backendsSection = UIMenu(title: "", options: .displayInline, children: backendActions)
+
+        let manageAction = UIAction(
+            title: "Manage backends…",
+            image: UIImage(systemName: "slider.horizontal.3")
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            let nav = UINavigationController(rootViewController: ExecutionBackendVC())
+            nav.modalPresentationStyle = .formSheet
+            self.present(nav, animated: true)
+        }
+        let manageSection = UIMenu(title: "", options: .displayInline, children: [manageAction])
+
+        return UIMenu(title: "Execution Backend", children: [backendsSection, manageSection])
     }
 
     private func updateMuteButtonAppearance() {
@@ -2322,15 +2552,39 @@ extension MessagingVC {
     }
     
     func setupUI() {
-        let views: [UIView] = [tableView, messageBox, subAgentStatusBar, actionButtonReminderBar]
+        // Execution-backend indicator — a full-width footer bar beneath the
+        // input field showing the active backend's name; tapping it opens a
+        // picker to switch backends (single tap via primary-action menu). The
+        // bar fills the area below the safe area (the home-indicator strip) with
+        // a secondary background; the label sits near its top, just under the
+        // input field, so it clears the home indicator.
+        let backendButton = UIButton(type: .system)
+        backendButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        backendButton.titleLabel?.lineBreakMode = .byTruncatingTail
+        backendButton.tintColor = .secondaryLabel
+        backendButton.setTitleColor(.secondaryLabel, for: .normal)
+        backendButton.backgroundColor = .secondarySystemBackground
+        backendButton.contentVerticalAlignment = .center
+        backendButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
+        backendButton.showsMenuAsPrimaryAction = true
+        self.backendIndicatorButton = backendButton
+
+        let views: [UIView] = [tableView, messageBox, subAgentStatusBar, actionButtonReminderBar, backendButton]
         for view in views {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.view.addSubview(view)
         }
         subAgentStatusBar.delegate = self
         actionButtonReminderBar.delegate = self
-        bottomConstraint = messageBox.bottomAnchor.constraint(equalTo: self.view.bottomAnchor)
+        bottomConstraint = messageBox.bottomAnchor.constraint(equalTo: backendButton.topAnchor)
         NSLayoutConstraint.activate([
+            backendButton.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            backendButton.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
+            // Occupy only the area below the safe area (the home-indicator strip)
+            // so the input field drops down to sit just above the safe area.
+            backendButton.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor),
+            backendButton.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+
             subAgentStatusBar.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
             subAgentStatusBar.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor),
             subAgentStatusBar.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
@@ -2372,14 +2626,21 @@ extension MessagingVC {
         // tableView.canCancelContentTouches = true
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow(_:)), name: UIResponder.keyboardWillShowNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
+
+        updateBackendIndicator()
     }
 
     // Adjust bottom constraint when the keyboard shows
     @objc func keyboardWillShow(_ notification: Notification) {
         guard let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
         let keyboardHeight = keyboardFrame.height
-        bottomConstraint?.constant = -keyboardHeight
-        
+        // `messageBox` is pinned above the backend indicator, which itself sits
+        // in the bottom safe area. Add back the gap between the indicator's top
+        // and the screen bottom so the input still lands just above the keyboard
+        // (the indicator is covered by the keyboard while typing).
+        let bottomGap = view.bounds.height - (backendIndicatorButton?.frame.minY ?? view.bounds.height)
+        bottomConstraint?.constant = -keyboardHeight + bottomGap
+
         UIView.animate(withDuration: 0.3, animations: {
             self.view.layoutIfNeeded()
         }, completion: { completed in
@@ -2687,16 +2948,32 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         return self.visible_messages.count + addional_cell_count
     }
     
+    /// Tool-call turns render as a collapsible "Used N tools" disclosure. Wire the
+    /// toggle delegate, expanded state, and display resolver before setData, which
+    /// reads them synchronously in its disclosure branch. Shared by the message
+    /// rows and the live streaming bubble.
+    private func configureToolDisclosure(for cell: MessagingCell, message: MessageStruct) {
+        guard message.role == "assistant", !message.functions.isEmpty else { return }
+        cell.toolDelegate = self
+        cell.toolExpanded = expandedToolMessageIds.contains(message.id)
+        cell.toolDisplayProvider = { [weak self] call in
+            guard let self = self else { return (title: call.name, subtitle: "") }
+            return (title: self.toolDisplayName(for: call), subtitle: self.argSummary(for: call))
+        }
+    }
+
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         if indexPath.row == self.visible_messages.count {
             let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath) as! MessagingCell
             // While streaming, this trailing row shows the partial assistant
             // text instead of the "Thinking…" shimmer. shouldAnimate is false
             // because the streaming reveal IS the animation.
-            if !self.streamingPartial.isEmpty {
-                let partial = MessageStruct(role: "assistant",
+            if !self.streamingPartial.isEmpty || !self.streamingToolCalls.isEmpty {
+                var partial = MessageStruct(id: self.streamingMessageId, role: "assistant",
                                             content: self.streamingPartial,
                                             model: ModelSelectionStore.current.stampedMessageModel)
+                partial.functions = self.streamingToolCalls
+                self.configureToolDisclosure(for: cell, message: partial)
                 cell.setData(data: partial, shouldAnimate: false)
             } else {
                 cell.setAnimationState(state: self.ai_state)
@@ -2714,17 +2991,7 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         cell.imageDelegate = self
         cell.pdfDelegate = self
         cell.onboardingDelegate = self
-        // Tool-call turns render as a collapsible "Used N tools" disclosure.
-        // Wire the toggle delegate, expanded state, and display resolver before
-        // setData, which reads them synchronously in its disclosure branch.
-        if message.role == "assistant" && !message.functions.isEmpty {
-            cell.toolDelegate = self
-            cell.toolExpanded = expandedToolMessageIds.contains(message.id)
-            cell.toolDisplayProvider = { [weak self] call in
-                guard let self = self else { return (title: call.name, subtitle: "") }
-                return (title: self.toolDisplayName(for: call), subtitle: self.argSummary(for: call))
-            }
-        }
+        configureToolDisclosure(for: cell, message: message)
         cell.setData(data: message, shouldAnimate: message.id == self.messageIdToAnimate)
         if message.id == self.messageIdToAnimate {
             self.messageIdToAnimate = nil
@@ -3801,6 +4068,31 @@ extension MessagingVC: SubAgentStatusBarDelegate {
     /// Fired when a sub-agent's completion summary lands in the parent
     /// conversation. If the user has that conversation on screen, reload to
     /// show the bubble immediately.
+    /// A gateway turn's tool calls landed via transcript reconcile. Reload the
+    /// open chat in place so the disclosure appears. Skipped while a turn is still
+    /// streaming (ai_state != .None) so we never clobber the live bubble.
+    @objc func handleOpenClawToolCallsReconciled(_ notification: Notification) {
+        guard ai_state == .None,
+              let conversationId = notification.userInfo?["conversationId"] as? String,
+              let current = currentConversationEntity, current.id == conversationId,
+              let refreshed = conversationManager.getConversation(by: conversationId) else { return }
+        currentConversationEntity = refreshed
+        loadMessagesFromConversation(refreshed, refreshIfRemote: false)
+    }
+
+    /// An OpenClaw gateway turn produced image media the store appended as its own
+    /// bubble — reload from the store to show it. Mirrors the tool-call reconcile
+    /// path: gated on a finished turn (`.None`) so it can't disturb a live stream,
+    /// and `refreshIfRemote: false` since the store already holds the new message.
+    @objc func handleOpenClawMediaDidAttach(_ notification: Notification) {
+        guard ai_state == .None,
+              let conversationId = notification.userInfo?["conversationId"] as? String,
+              let current = currentConversationEntity, current.id == conversationId,
+              let refreshed = conversationManager.getConversation(by: conversationId) else { return }
+        currentConversationEntity = refreshed
+        loadMessagesFromConversation(refreshed, refreshIfRemote: false)
+    }
+
     @objc func handleSubAgentMessage(_ notification: Notification) {
         guard let conversationId = notification.userInfo?["conversationId"] as? String,
               let current = currentConversationEntity,
@@ -3982,6 +4274,18 @@ extension MessagingVC: OnboardingCoordinatorHost, OnboardingCardDelegate {
     /// `OnboardingState` directly.
     func onboardingDidComplete() {
         // No-op for now.
+    }
+
+    /// Coordinator → host: lock/unlock the chat surface for the scripted flow.
+    /// The nav-bar controls stay disabled for the whole of onboarding; the
+    /// input field is only enabled on the steps that need typing (key paste)
+    /// and once onboarding finishes. The placeholder doubles as a hint that
+    /// the user should answer through the cards while it's locked.
+    func onboardingSetInteractionEnabled(input: Bool, chrome: Bool) {
+        setOnboardingChromeEnabled(chrome)
+        messageBox.setInputEnabled(
+            input,
+            placeholder: input ? "Ask anything" : "Tap an option above")
     }
 
     /// Card view → host: chip taps + action-button events. Forward to the

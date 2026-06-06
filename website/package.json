@@ -1,0 +1,12 @@
+{
+  "name": "loopharness-website",
+  "private": true,
+  "description": "Static landing page for loopharness.com + the dynamic OG image edge function.",
+  "dependencies": {
+    "@vercel/og": "^0.6.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.31"
+  }
+}
