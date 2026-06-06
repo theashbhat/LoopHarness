@@ -466,6 +466,10 @@ final class BackgroundScheduler {
                 completion(false)
             case .notDetermined:
                 self.center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                    // Obtain & register the APNs token now that we're authorized.
+                    if granted {
+                        PushRegistration.shared.registerIfAuthorized()
+                    }
                     completion(granted)
                 }
             @unknown default:
