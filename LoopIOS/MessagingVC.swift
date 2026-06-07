@@ -1172,6 +1172,9 @@ extension MessagingVC: MessageBoxDelegate {
                                 let viewing = self.currentConversationEntity?.id == reqConvId
 
                                 DispatchQueue.main.async {
+                                    ActiveRequestTracker.shared.markIdle(reqConvId)
+                                    self.streamingPartial = ""
+                                    VoiceLoopCoordinator.shared.setState(.idle)
                                     if viewing {
                                         self.messages.append(responseMessage)
                                         self.messageIdToAnimate = responseMessage.id
@@ -1181,6 +1184,25 @@ extension MessagingVC: MessageBoxDelegate {
                                     }
                                 }
 
+                            } catch {
+                                print("Apple on-device fallback error (tool loop): \(error)")
+                                DispatchQueue.main.async {
+                                    ActiveRequestTracker.shared.markIdle(reqConvId)
+                                    self.streamingPartial = ""
+                                    VoiceLoopCoordinator.shared.setState(.idle)
+                                    let errorMessage = MessageStruct(role: "assistant", content: "Sorry – Apple's on-device model couldn't respond. You can try again or switch models in Settings ▸ Model.")
+                                    if let target = self.conversationManager.getConversation(by: reqConvId) {
+                                        self.conversationManager.addMessage(errorMessage, to: target)
+                                    }
+                                    let viewing = self.currentConversationEntity?.id == reqConvId
+                                    if viewing {
+                                        self.messages.append(errorMessage)
+                                        self.messageIdToAnimate = errorMessage.id
+                                        self.tableView.reloadData()
+                                        self.scrollToLastMessage()
+                                    }
+                                    EarconPlayer.shared.play(.error)
+                                }
                             }
                         }
                         return
@@ -1329,9 +1351,7 @@ extension MessagingVC: MessageBoxDelegate {
                         let singlePrompt = self.makeSinglePrompt(from: self.contextMessages(for: requestConversationId))
                         Task {
                             do {
-                                print(singlePrompt)
                                 let response = try await session.respond(to: singlePrompt)
-                                print(response)
                                 var responseMessage = MessageStruct(role: "assistant", content: response.content, model: "Apple LLM")
                                 if compactionTrigger == .hard {
                                     responseMessage.content += "\n\n(compacting context in the background)"
@@ -1346,6 +1366,9 @@ extension MessagingVC: MessageBoxDelegate {
                                 let isStillViewing = self.currentConversationEntity?.id == requestConversationId
 
                                 DispatchQueue.main.async {
+                                    ActiveRequestTracker.shared.markIdle(requestConversationId)
+                                    self.streamingPartial = ""
+                                    VoiceLoopCoordinator.shared.setState(.idle)
                                     if isStillViewing {
                                         self.messages.append(responseMessage)
                                         self.messageIdToAnimate = responseMessage.id
@@ -1355,6 +1378,25 @@ extension MessagingVC: MessageBoxDelegate {
                                     }
                                 }
 
+                            } catch {
+                                print("Apple on-device fallback error: \(error)")
+                                DispatchQueue.main.async {
+                                    ActiveRequestTracker.shared.markIdle(requestConversationId)
+                                    self.streamingPartial = ""
+                                    VoiceLoopCoordinator.shared.setState(.idle)
+                                    let errorMessage = MessageStruct(role: "assistant", content: "Sorry – Apple's on-device model couldn't respond. You can try again or switch models in Settings ▸ Model.")
+                                    if let target = self.conversationManager.getConversation(by: requestConversationId) {
+                                        self.conversationManager.addMessage(errorMessage, to: target)
+                                    }
+                                    let isStillViewing = self.currentConversationEntity?.id == requestConversationId
+                                    if isStillViewing {
+                                        self.messages.append(errorMessage)
+                                        self.messageIdToAnimate = errorMessage.id
+                                        self.tableView.reloadData()
+                                        self.scrollToLastMessage()
+                                    }
+                                    EarconPlayer.shared.play(.error)
+                                }
                             }
                         }
                         return
