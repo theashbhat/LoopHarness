@@ -41,7 +41,18 @@ final class VoiceLoopCoordinator {
 
     /// Which speech-to-text backend is driving the current (or most recent)
     /// transcription session. `nil` before the first recording.
-    enum STTEngine { case deepgram, apple }
+    enum STTEngine {
+        case deepgram, apple
+
+        /// Compact label stamped onto a dictated message ("DG" / "APL") and
+        /// shown as a byline under the user's bubble.
+        var shortLabel: String {
+            switch self {
+            case .deepgram: return "DG"
+            case .apple: return "APL"
+            }
+        }
+    }
 
     private(set) var activeSTTEngine: STTEngine? {
         didSet {

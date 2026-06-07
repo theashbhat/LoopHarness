@@ -170,6 +170,11 @@ struct MessageStruct {
     /// Surfaced by the iMessage-style swipe-left timestamp reveal in the chat.
     var timestamp: Date = Date()
 
+    /// Speech-to-text engine that produced this message when it was dictated
+    /// ("DG" for Deepgram, "APL" for Apple). `nil` for typed messages and any
+    /// non-voice path. Surfaced as a small byline under the user's bubble.
+    var sttEngine: String? = nil
+
     /// Explicit init that still accepts `function:` as a singular optional —
     /// keeps existing call sites compiling now that `function` is a computed
     /// view over the underlying `functions` array.
@@ -191,7 +196,8 @@ struct MessageStruct {
          reasoningContent: String? = nil,
          tokenUsage: TokenUsage? = nil,
          ttft: TimeInterval? = nil,
-         timestamp: Date = Date()) {
+         timestamp: Date = Date(),
+         sttEngine: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -216,6 +222,7 @@ struct MessageStruct {
         self.tokenUsage = tokenUsage
         self.ttft = ttft
         self.timestamp = timestamp
+        self.sttEngine = sttEngine
     }
 
     /// Generic JSON representation of the message. Provider-specific chat

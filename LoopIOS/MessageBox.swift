@@ -12,8 +12,18 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 protocol MessageBoxDelegate: AnyObject {
-    func didSendMessageText(_ message: String)
+    /// `sttEngine` carries the short label ("DG"/"APL") when the text came from
+    /// dictation, so the cell can show a transcription byline under the bubble.
+    /// `nil` for typed input.
+    func didSendMessageText(_ message: String, sttEngine: String?)
     func stopSpeech()
+}
+
+extension MessageBoxDelegate {
+    /// Convenience for the typed-input path — no STT engine to attribute.
+    func didSendMessageText(_ message: String) {
+        didSendMessageText(message, sttEngine: nil)
+    }
 }
 
 enum MessageBoxState {
@@ -67,11 +77,7 @@ class MessageBox: UIView {
     let recordingContainerView = UIView()
     let waveformView = UIView()
     let transcribingLabel = UILabel()
-    /// Small monospaced badge showing the active STT engine ("DG" or "APL").
-    /// Sits to the trailing side of `transcribingLabel` during recording /
-    /// transcription states.
-    private let sttBadge = UILabel()
-    
+
     // Recording state
     var currentState: MessageBoxState = .normal
     var audioRecorder: AVAudioRecorder?
@@ -179,7 +185,7 @@ class MessageBox: UIView {
             attachmentChipView.addSubview(v)
         }
         
-        let recordingViews: [UIView] = [waveformView, transcribingLabel, sttBadge]
+        let recordingViews: [UIView] = [waveformView, transcribingLabel]
         for view in recordingViews {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.recordingContainerView.addSubview(view)
@@ -275,12 +281,7 @@ class MessageBox: UIView {
             waveformView.bottomAnchor.constraint(equalTo: recordingContainerView.bottomAnchor, constant: -3),
 
             transcribingLabel.centerXAnchor.constraint(equalTo: recordingContainerView.centerXAnchor),
-            transcribingLabel.centerYAnchor.constraint(equalTo: recordingContainerView.centerYAnchor),
-
-            sttBadge.leadingAnchor.constraint(equalTo: transcribingLabel.trailingAnchor, constant: 6),
-            sttBadge.centerYAnchor.constraint(equalTo: transcribingLabel.centerYAnchor),
-            sttBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 28),
-            sttBadge.heightAnchor.constraint(equalToConstant: 16)
+            transcribingLabel.centerYAnchor.constraint(equalTo: recordingContainerView.centerYAnchor)
         ])
         
         keyboardButton.isHidden = true
@@ -394,17 +395,6 @@ class MessageBox: UIView {
         transcribingLabel.font = UIFont.preferredFont(forTextStyle: .body)
         transcribingLabel.isHidden = true
 
-        sttBadge.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .semibold)
-        sttBadge.textColor = .secondaryLabel
-        sttBadge.textAlignment = .center
-        sttBadge.layer.borderWidth = 1
-        sttBadge.layer.borderColor = UIColor.separator.cgColor
-        sttBadge.layer.cornerRadius = 4
-        sttBadge.layer.cornerCurve = .continuous
-        sttBadge.clipsToBounds = true
-        sttBadge.isHidden = true
-        sttBadge.translatesAutoresizingMaskIntoConstraints = false
-        
         emptyLabel.text = "Ask anything"
         emptyLabel.textColor = .secondaryLabel
         emptyLabel.font = UIFont.preferredFont(forTextStyle: .body)
@@ -638,7 +628,6 @@ class MessageBox: UIView {
         recordingContainerView.isHidden = false
         waveformView.isHidden = false
         transcribingLabel.isHidden = true
-        sttBadge.isHidden = true
 
         // Files button → red Stop, mic button → blue Send. Both stay visible,
         // floating over the recording container with the waveform between them.
@@ -668,7 +657,6 @@ class MessageBox: UIView {
         // the streaming recording phase.
         transcribingLabel.text = "transcribing…"
         transcribingLabel.isHidden = false
-        refreshSTTBadge()
 
         VoiceLoopCoordinator.shared.setState(.transcribing)
         // User committed to sending whatever they just said — same auditory
@@ -689,7 +677,6 @@ class MessageBox: UIView {
         recordingContainerView.isHidden = true
         waveformView.isHidden = true
         transcribingLabel.isHidden = true
-        sttBadge.isHidden = true
 
         // Clean up long-press recording state
         isLongPressRecording = false
@@ -726,21 +713,6 @@ class MessageBox: UIView {
         }
     }
     
-    /// Updates the STT badge text and visibility based on the coordinator's
-    /// active engine. Called from state transitions that show `transcribingLabel`.
-    private func refreshSTTBadge() {
-        switch VoiceLoopCoordinator.shared.activeSTTEngine {
-        case .deepgram:
-            sttBadge.text = " DG "
-            sttBadge.isHidden = false
-        case .apple:
-            sttBadge.text = " APL "
-            sttBadge.isHidden = false
-        case nil:
-            sttBadge.isHidden = true
-        }
-    }
-
     // MARK: - Permission Handling
     
     private func requestMicrophonePermission(completion: @escaping (Bool) -> Void) {
@@ -783,12 +755,10 @@ class MessageBox: UIView {
         }
         if shouldTryDeepgram, beginStreamingRecording() {
             VoiceLoopCoordinator.shared.setSTTEngine(.deepgram)
-            refreshSTTBadge()
             return
         }
 
         VoiceLoopCoordinator.shared.setSTTEngine(.apple)
-        refreshSTTBadge()
 
         // Setup audio session to allow background audio to continue playing
         // and earcons to be audible.
@@ -1055,7 +1025,10 @@ class MessageBox: UIView {
                     print("Transcription successful: '\(transcribedText)'")
                     
                     if !transcribedText.isEmpty {
-                        self?.delegate?.didSendMessageText(transcribedText)
+                        self?.delegate?.didSendMessageText(
+                            transcribedText,
+                            sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.shortLabel
+                        )
                     } else {
                         print("Transcription returned empty string")
                     }
@@ -1610,7 +1583,6 @@ extension MessageBox {
     fileprivate func fallbackToSFSpeechOnFailure() {
         guard isStreamingSTT else { return }
         VoiceLoopCoordinator.shared.setSTTEngine(.apple)
-        refreshSTTBadge()
 
         if let engine = audioEngine, engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
@@ -1660,7 +1632,10 @@ extension MessageBox {
         let final = text.trimmingCharacters(in: .whitespacesAndNewlines)
         teardownStreaming()
         if !final.isEmpty {
-            delegate?.didSendMessageText(final)
+            delegate?.didSendMessageText(
+                final,
+                sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.shortLabel
+            )
         }
         returnToNormalState()
     }
