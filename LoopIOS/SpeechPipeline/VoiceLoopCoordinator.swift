@@ -27,6 +27,8 @@ extension Notification.Name {
     /// assistant just finished". MainVC subscribes and calls
     /// `avatar.pulse()` on both the nav-bar and hero instances.
     static let voiceLoopAcknowledgePulse = Notification.Name("voiceLoopAcknowledgePulse")
+    /// Posted when the active STT engine changes so the badge label can update.
+    static let voiceLoopSTTEngineDidChange = Notification.Name("voiceLoopSTTEngineDidChange")
 }
 
 #if !os(macOS)
@@ -36,6 +38,19 @@ final class VoiceLoopCoordinator {
     /// Mirrors the Mac coordinator's State enum. Same five cases so a future
     /// shared implementation (Phase B) doesn't need a rename.
     enum State { case idle, recording, transcribing, thinking, speaking }
+
+    /// Which speech-to-text backend is driving the current (or most recent)
+    /// transcription session. `nil` before the first recording.
+    enum STTEngine { case deepgram, apple }
+
+    private(set) var activeSTTEngine: STTEngine? {
+        didSet {
+            guard activeSTTEngine != oldValue else { return }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .voiceLoopSTTEngineDidChange, object: nil)
+            }
+        }
+    }
 
     private(set) var state: State = .idle {
         didSet {
@@ -78,6 +93,10 @@ final class VoiceLoopCoordinator {
     /// have to dedupe.
     func setState(_ newState: State) {
         state = newState
+    }
+
+    func setSTTEngine(_ engine: STTEngine) {
+        activeSTTEngine = engine
     }
 
     func publishAmplitude(_ amplitude: Float) {
