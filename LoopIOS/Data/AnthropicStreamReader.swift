@@ -40,6 +40,10 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
     private var toolUseBlocks: [Int: ToolUseAccumulator] = [:]
     /// Track content block types by index so deltas can route correctly.
     private var blockTypes: [Int: String] = [:]
+    /// Once a tool_use block starts, suppress `onDelta` for subsequent text
+    /// deltas so pre-tool thinking text doesn't leak into the streaming
+    /// bubble as visible assistant prose.
+    private var sawToolUse = false
 
     private var lineBuffer = ""
     private var currentEventType = ""
@@ -133,6 +137,7 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
                   let type = block["type"] as? String else { return }
             blockTypes[idx] = type
             if type == "tool_use" {
+                sawToolUse = true
                 var acc = ToolUseAccumulator()
                 if let id = block["id"] as? String { acc.id = id }
                 if let name = block["name"] as? String { acc.name = name }
@@ -146,7 +151,14 @@ final class AnthropicStreamReader: NSObject, URLSessionDataDelegate {
 
             if deltaType == "text_delta", let text = delta["text"] as? String {
                 contentBuffer += text
-                onDelta?(text)
+                // Only stream text to the live bubble while no tool_use block
+                // has been seen. Once tool calls start, the pre-tool prose is
+                // captured in contentBuffer for the disclosure but suppressed
+                // from the streaming partial so the user doesn't see raw
+                // tool-invocation reasoning leak into the main transcript.
+                if !sawToolUse {
+                    onDelta?(text)
+                }
             } else if deltaType == "input_json_delta",
                       let partial = delta["partial_json"] as? String {
                 toolUseBlocks[idx]?.inputJSON += partial
