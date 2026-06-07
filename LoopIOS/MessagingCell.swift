@@ -729,7 +729,7 @@ class MessagingCell: UITableViewCell {
             actionButton.isHidden = true
             shimmerLabel.isHidden = true
 
-            // Dictation byline ("DG"/"APL") under the user bubble, reusing
+            // Dictation byline ("Deepgram STT"/"Apple STT") under the user bubble, reusing
             // `modelLabel`. When present it drives the cell bottom; otherwise
             // the text view pins to the bottom as before.
             let sttByline = data.sttEngine?.trimmingCharacters(in: .whitespaces)

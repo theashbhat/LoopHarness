@@ -171,7 +171,7 @@ struct MessageStruct {
     var timestamp: Date = Date()
 
     /// Speech-to-text engine that produced this message when it was dictated
-    /// ("DG" for Deepgram, "APL" for Apple). `nil` for typed messages and any
+    /// ("Deepgram STT" / "Apple STT"). `nil` for typed messages and any
     /// non-voice path. Surfaced as a small byline under the user's bubble.
     var sttEngine: String? = nil
 

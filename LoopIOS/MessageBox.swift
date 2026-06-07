@@ -12,9 +12,9 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 protocol MessageBoxDelegate: AnyObject {
-    /// `sttEngine` carries the short label ("DG"/"APL") when the text came from
-    /// dictation, so the cell can show a transcription byline under the bubble.
-    /// `nil` for typed input.
+    /// `sttEngine` carries the engine label ("Deepgram STT"/"Apple STT") when
+    /// the text came from dictation, so the cell can show a transcription byline
+    /// under the bubble. `nil` for typed input.
     func didSendMessageText(_ message: String, sttEngine: String?)
     func stopSpeech()
 }
@@ -1027,7 +1027,7 @@ class MessageBox: UIView {
                     if !transcribedText.isEmpty {
                         self?.delegate?.didSendMessageText(
                             transcribedText,
-                            sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.shortLabel
+                            sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.displayLabel
                         )
                     } else {
                         print("Transcription returned empty string")
@@ -1634,7 +1634,7 @@ extension MessageBox {
         if !final.isEmpty {
             delegate?.didSendMessageText(
                 final,
-                sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.shortLabel
+                sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.displayLabel
             )
         }
         returnToNormalState()

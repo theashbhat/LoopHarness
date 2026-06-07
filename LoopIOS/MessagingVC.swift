@@ -1300,7 +1300,7 @@ extension MessagingVC: MessageBoxDelegate {
         let stagedAttachment = self.messageBox.pendingAttachment
         var messageStruct = MessageStruct(role: "user", content: message)
         messageStruct.fileAttachment = stagedAttachment
-        // Dictated messages carry the STT engine ("DG"/"APL") so the cell can
+        // Dictated messages carry the STT engine ("Deepgram STT"/"Apple STT") so the cell can
         // show a transcription byline under the user bubble; nil when typed.
         messageStruct.sttEngine = sttEngine
 

@@ -44,12 +44,12 @@ final class VoiceLoopCoordinator {
     enum STTEngine {
         case deepgram, apple
 
-        /// Compact label stamped onto a dictated message ("DG" / "APL") and
-        /// shown as a byline under the user's bubble.
-        var shortLabel: String {
+        /// Label stamped onto a dictated message ("Deepgram STT" / "Apple STT")
+        /// and shown as a byline under the user's bubble.
+        var displayLabel: String {
             switch self {
-            case .deepgram: return "DG"
-            case .apple: return "APL"
+            case .deepgram: return "Deepgram STT"
+            case .apple: return "Apple STT"
             }
         }
     }

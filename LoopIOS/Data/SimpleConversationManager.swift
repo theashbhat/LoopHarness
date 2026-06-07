@@ -369,7 +369,7 @@ class SimpleConversationManager {
             // Persist model attribution so reload paths can show the same
             // "Apple LLM" / "GPT 5.5 Instant" badge that the live append
             // path renders. Only meaningful for assistant turns. User turns
-            // reuse this column to carry the dictation byline ("DG"/"APL"),
+            // reuse this column to carry the dictation byline ("Deepgram STT"/"Apple STT"),
             // which is otherwise unused for the user side.
             model: messageStruct.role == "assistant" ? messageStruct.model : messageStruct.sttEngine,
             isCompactionSummary: messageStruct.isCompactionSummary ? true : nil,
