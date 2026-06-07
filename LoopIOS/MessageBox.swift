@@ -644,6 +644,13 @@ class MessageBox: UIView {
         // floating over the recording container with the waveform between them.
         refreshInputButtons()
 
+        // Duck music synchronously BEFORE the earcon and state change so the
+        // earcon doesn't collide with a playing track. The notification-based
+        // duck in MusicController.handleVoiceLoopState fires asynchronously
+        // after the next run-loop tick; calling duckForVoiceSession() here
+        // ensures the pause lands first.
+        MusicController.shared.duckForVoiceSession()
+
         VoiceLoopCoordinator.shared.setState(.recording)
         EarconPlayer.shared.play(.listenStart)
 
