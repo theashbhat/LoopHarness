@@ -78,6 +78,10 @@ class MessagingVC: UIViewController {
     /// sub-agents are alive so it doesn't eat layout space.
     let subAgentStatusBar = SubAgentStatusBarView()
 
+    /// Horizontally scrollable top banner that hosts the sub-agent pill and
+    /// the music mini-player. Scrolls when multiple items coexist.
+    let topBannerScroll = TopBannerScrollView()
+
     /// Persistent reminder shown after the user skipped the Action Button
     /// step during onboarding. Same collapse-to-zero behavior as the
     /// sub-agent pill, stacked just below it.
@@ -171,6 +175,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             // every assignment so create/switch/reload paths all propagate
             // without each having to call the pill directly.
             subAgentStatusBar.conversationId = currentConversationEntity?.id
+            topBannerScroll.conversationId = currentConversationEntity?.id
         }
     }
     
@@ -2569,12 +2574,13 @@ extension MessagingVC {
         backendButton.showsMenuAsPrimaryAction = true
         self.backendIndicatorButton = backendButton
 
-        let views: [UIView] = [tableView, messageBox, subAgentStatusBar, actionButtonReminderBar, backendButton]
+        let views: [UIView] = [tableView, messageBox, subAgentStatusBar, topBannerScroll, actionButtonReminderBar, backendButton]
         for view in views {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.view.addSubview(view)
         }
         subAgentStatusBar.delegate = self
+        topBannerScroll.bannerDelegate = self
         actionButtonReminderBar.delegate = self
         bottomConstraint = messageBox.bottomAnchor.constraint(equalTo: backendButton.topAnchor)
         NSLayoutConstraint.activate([
@@ -2589,8 +2595,15 @@ extension MessagingVC {
             subAgentStatusBar.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor),
             subAgentStatusBar.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
 
+            // Music mini-player banner sits below the sub-agent status bar.
+            // Scrolls horizontally when both the sub-agent pill and music pill
+            // coexist (the sub-agent pill remains in its fixed position above).
+            topBannerScroll.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            topBannerScroll.topAnchor.constraint(equalTo: subAgentStatusBar.bottomAnchor),
+            topBannerScroll.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
+
             actionButtonReminderBar.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
-            actionButtonReminderBar.topAnchor.constraint(equalTo: subAgentStatusBar.bottomAnchor),
+            actionButtonReminderBar.topAnchor.constraint(equalTo: topBannerScroll.bottomAnchor),
             actionButtonReminderBar.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
 
             tableView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
@@ -4045,6 +4058,14 @@ extension MessagingVC: TwitterSkillHost {
             completion(false)
         })
         present(alert, animated: true)
+    }
+}
+
+// MARK: - Top banner scroll delegate
+
+extension MessagingVC: TopBannerScrollViewDelegate {
+    func topBannerHeightDidChange() {
+        view.layoutIfNeeded()
     }
 }
 
