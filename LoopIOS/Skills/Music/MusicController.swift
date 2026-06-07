@@ -65,6 +65,13 @@ final class MusicController {
     private(set) var nowPlaying: NowPlaying?
     private(set) var pauseReason: PauseReason?
 
+    /// Opaque token set when music is ducked for a voice session. Cleared
+    /// when the user explicitly stops music or changes the queue via system
+    /// controls, so an orphaned auto-resume never fires after the user has
+    /// moved on. A new `play_music` call replaces the token (the new track
+    /// becomes the resume target).
+    private(set) var resumeToken: UUID?
+
     // MARK: - Internals
 
     private let player = ApplicationMusicPlayer.shared
@@ -248,6 +255,8 @@ final class MusicController {
         try await player.prepareToPlay()
         try await player.play()
         pauseReason = nil
+        reduckIfVoiceSessionActive()
+
         AgentActivityLog.shared.log(.status, "playing \(nowPlaying?.title ?? "music")")
 
         var out: [String: Any] = ["status": "ok"]
@@ -317,6 +326,7 @@ final class MusicController {
                 throw error
             }
             pauseReason = nil
+            reduckIfVoiceSessionActive()
             AgentActivityLog.shared.log(.status, "playing \(song.title)")
             return [
                 "status": "ok",
@@ -349,6 +359,7 @@ final class MusicController {
                 throw error
             }
             pauseReason = nil
+            reduckIfVoiceSessionActive()
             AgentActivityLog.shared.log(.status, "playing \(playlist.name)")
             return [
                 "status": "ok",
@@ -372,8 +383,69 @@ final class MusicController {
         player.pause()
         pauseReason = reason
         if reason == .userExplicit {
+            resumeToken = nil
             AgentActivityLog.shared.log(.status, "paused music")
         }
+    }
+
+    // MARK: - Voice-session ducking
+
+    /// Synchronously pause music and arm the resume token. Call this
+    /// **before** the earcon plays so the music drops before the cue sounds.
+    /// The notification-based path in `handleVoiceLoopState` still acts as a
+    /// safety net (if the caller forgets, the duck will still happen on the
+    /// next state change), but calling this explicitly avoids the async
+    /// latency of the NotificationCenter round-trip.
+    func duckForVoiceSession() {
+        guard player.state.playbackStatus == .playing else { return }
+        player.pause()
+        pauseReason = .duckRecording
+        resumeToken = UUID()
+        print("MusicController: ducked for voice session (token=\(resumeToken!.uuidString.prefix(8)))")
+    }
+
+    /// Resume music after a voice session if the resume token is still valid
+    /// and we paused for a duck reason. Fails silently on any error so the
+    /// user is never spammed with alerts.
+    func resumeAfterVoiceSession() {
+        guard resumeToken != nil else {
+            print("MusicController: resumeAfterVoiceSession — no resume token, skipping")
+            return
+        }
+        guard pauseReason == .duckRecording || pauseReason == .duckSpeaking else {
+            print("MusicController: resumeAfterVoiceSession — pauseReason is \(String(describing: pauseReason)), skipping")
+            return
+        }
+        Task { [weak self] in
+            do {
+                try await self?.player.play()
+                await MainActor.run {
+                    self?.pauseReason = nil
+                    print("MusicController: resumed after voice session")
+                }
+            } catch {
+                print("MusicController: resumeAfterVoiceSession failed — \(error)")
+                // Fail silently. The track may no longer be in the queue,
+                // Apple Music might have errored, etc.
+            }
+        }
+    }
+
+    /// If the voice loop is in a non-idle state (recording, thinking,
+    /// speaking, …), immediately re-pause the player so a `play()` or
+    /// `setMusicMood()` call made mid-turn doesn't bleed audio. The new
+    /// track stays queued and becomes the resume target when the turn ends.
+    private func reduckIfVoiceSessionActive() {
+        #if os(macOS)
+        let voiceState = VoiceLoopCoordinator.current?.state ?? .idle
+        #else
+        let voiceState = VoiceLoopCoordinator.shared.state
+        #endif
+        guard voiceState != .idle else { return }
+        player.pause()
+        pauseReason = .duckSpeaking
+        resumeToken = UUID()
+        print("MusicController: re-paused for active voice session (state=\(voiceState))")
     }
 
     func resume(reason: PauseReason? = nil) async throws {
@@ -399,6 +471,7 @@ final class MusicController {
     func stop() {
         player.stop()
         pauseReason = .userExplicit
+        resumeToken = nil
         nowPlaying = nil
         AgentActivityLog.shared.log(.status, "stopped music")
     }
@@ -413,6 +486,7 @@ final class MusicController {
         if let r = pauseReason {
             out["pause_reason"] = String(describing: r)
         }
+        out["will_auto_resume"] = resumeToken != nil
         if let np = nowPlaying {
             out["now_playing"] = [
                 "title": np.title,
@@ -514,21 +588,32 @@ final class MusicController {
         switch state {
         case .recording:
             // Pause if currently playing; remember why so we can auto-resume.
+            // The caller may have already called duckForVoiceSession()
+            // synchronously — in that case the player is already paused and
+            // this is a no-op.
             if player.state.playbackStatus == .playing {
-                pause(reason: .duckRecording)
+                player.pause()
+                pauseReason = .duckRecording
+                if resumeToken == nil { resumeToken = UUID() }
             }
         case .speaking:
             if player.state.playbackStatus == .playing {
-                pause(reason: .duckSpeaking)
+                player.pause()
+                pauseReason = .duckSpeaking
+                if resumeToken == nil { resumeToken = UUID() }
             }
-        case .idle, .thinking, .transcribing:
-            // Resume only if we paused for a duck reason. User-explicit
-            // pauses (or interruptions) stay paused until the user/system
-            // says otherwise.
-            if pauseReason == .duckRecording || pauseReason == .duckSpeaking {
-                Task { [weak self] in
-                    try? await self?.resume(reason: self?.pauseReason)
-                }
+        case .thinking, .transcribing:
+            // Mid-voice-flow — the assistant hasn't spoken yet. Keep music
+            // paused so there's no audible gap between recording-end and
+            // TTS-start. Resume is deferred to `.idle`.
+            break
+        case .idle:
+            // The voice turn is fully complete (TTS finished, mic closed).
+            // Resume only if we ducked and the resume token is still valid
+            // (not cleared by a user-explicit stop or track change).
+            if resumeToken != nil,
+               pauseReason == .duckRecording || pauseReason == .duckSpeaking {
+                resumeAfterVoiceSession()
             }
         }
     }
