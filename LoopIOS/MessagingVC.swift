@@ -2432,7 +2432,27 @@ extension MessagingVC: MessageBoxDelegate {
         let coord = VoiceLoopCoordinator.shared
         if coord.state == .speaking {
             coord.setState(.idle)
+            // Deactivate the audio session with .notifyOthersOnDeactivation so
+            // the system sends "interruption ended — you may resume" to any
+            // other audio app (Apple Music, Spotify, podcasts) that was paused
+            // when we activated our .playback session. Without this, system
+            // media stays paused indefinitely after Loop's TTS finishes.
+            deactivateAudioSession()
         }
+    }
+
+    /// Deactivate the shared audio session and notify other apps they may
+    /// resume playback. Called after TTS finishes and after recording ends.
+    /// Failures are best-effort — the session might already be inactive
+    /// (e.g. from the recording teardown path) which is harmless.
+    private func deactivateAudioSession() {
+        #if !os(macOS)
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            // best-effort; session may already be inactive
+        }
+        #endif
     }
 
     /// Speak `text` using on-device AVSpeechSynthesizer. No network, no Deepgram.
@@ -2450,7 +2470,7 @@ extension MessagingVC: MessageBoxDelegate {
             return
         }
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("Offline TTS: audio session setup failed (\(error)) — speaking anyway")
@@ -3575,6 +3595,7 @@ extension MessagingVC: AVAudioPlayerDelegate {
         audioPlayer = nil
         stopTTSMetering()
         VoiceLoopCoordinator.shared.setState(.idle)
+        deactivateAudioSession()
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
@@ -3585,6 +3606,7 @@ extension MessagingVC: AVAudioPlayerDelegate {
         audioPlayer = nil
         stopTTSMetering()
         VoiceLoopCoordinator.shared.setState(.idle)
+        deactivateAudioSession()
     }
 }
 
@@ -3602,6 +3624,7 @@ extension MessagingVC: AVSpeechSynthesizerDelegate {
             }
             self.offlineSpeechMessageId = nil
             VoiceLoopCoordinator.shared.setState(.idle)
+            self.deactivateAudioSession()
         }
     }
 
@@ -3624,7 +3647,7 @@ extension MessagingVC {
         // Match the existing playback session config so we don't fight the mic
         // engine if it was just torn down.
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("DeepgramTTS: audio session setup failed (\(error)) — falling back")
@@ -3665,6 +3688,7 @@ extension MessagingVC {
                         self.speechBuffer = ""
                     }
                     VoiceLoopCoordinator.shared.setState(.idle)
+                    self.deactivateAudioSession()
                     return
                 }
                 self.speakOffline(text: text, messageId: messageId)
@@ -3679,6 +3703,7 @@ extension MessagingVC {
                 }
                 self.deepgramTTS = nil
                 VoiceLoopCoordinator.shared.setState(.idle)
+                self.deactivateAudioSession()
             }
         }
         // Real per-buffer RMS into the avatar's speaking-mode pulse.
@@ -3734,7 +3759,7 @@ extension MessagingVC {
         guard let apiKey = MessagingVC.elevenLabsAPIKey else { return false }
 
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("ElevenLabsTTS: audio session setup failed (\(error)) — falling back")
@@ -3801,7 +3826,7 @@ extension MessagingVC {
         guard let apiKey = MessagingVC.openAIAPIKey else { return false }
 
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("OpenAITTS: audio session setup failed (\(error)) — falling back")
@@ -3860,7 +3885,7 @@ extension MessagingVC {
     private func playMP3Data(_ data: Data, messageId: String, speed: Double, providerLabel: String) {
         guard self.currentSpeechMessageId == messageId else { return }
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
             let player = try AVAudioPlayer(data: data)
             player.delegate = self
