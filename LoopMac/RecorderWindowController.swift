@@ -624,7 +624,13 @@ final class RecorderWindowController: NSWindowController, NSTextFieldDelegate, N
             // while the assistant works. The placeholder still conveys the
             // current pipeline stage.
             textField.isEnabled = true
-            textField.placeholderAttributedString = makeStateText("transcribing…")
+            let engineTag: String
+            switch VoiceLoopCoordinator.current?.activeSTTEngine {
+            case .deepgram: engineTag = " · DG"
+            case .apple:    engineTag = " · APL"
+            case nil:       engineTag = ""
+            }
+            textField.placeholderAttributedString = makeStateText("transcribing…\(engineTag)")
             waveformContainer.isHidden = true
             avatarView.mode = .thinking
         case .thinking:

@@ -92,6 +92,12 @@ final class VoiceLoopCoordinator {
     var onEmptyTranscript: (() -> Void)?
 
     enum State { case idle, recording, transcribing, thinking, speaking }
+
+    /// Which speech-to-text backend is driving the current (or most recent)
+    /// transcription session. `nil` before the first recording.
+    enum STTEngine { case deepgram, apple }
+    private(set) var activeSTTEngine: STTEngine?
+
     private(set) var state: State = .idle {
         didSet {
             DispatchQueue.main.async { [weak self] in
@@ -317,12 +323,14 @@ The current date and time is \(now).
             AppleSTT.requestAuthorization { [weak self] granted in
                 guard let self = self else { return }
                 if granted {
+                    self.activeSTTEngine = .apple
                     self.beginEngineApple()
                 } else {
                     print("⚠️ Speech recognition permission denied. Approve in System Settings → Privacy & Security → Speech Recognition.")
                 }
             }
         } else if let key = Self.deepgramAPIKey {
+            activeSTTEngine = .deepgram
             beginEngine(apiKey: key)
         }
     }
