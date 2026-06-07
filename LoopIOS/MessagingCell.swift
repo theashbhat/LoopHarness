@@ -110,6 +110,35 @@ class MessagingCell: UITableViewCell {
     /// untouched.
     let ttsIndicator = UIActivityIndicatorView(style: .medium)
 
+    // MARK: - Swipe-to-reveal timestamp (iMessage-style)
+    /// Sits just off the cell's right edge; revealed when the chat is swiped
+    /// left. MessagingVC drives every visible cell's `contentView` translation
+    /// in lock-step from a single pan, so all bubbles slide together and these
+    /// labels come into view at once. Text is the message's posted time.
+    let timeLabel: UILabel = {
+        let l = UILabel()
+        l.font = .preferredFont(forTextStyle: .caption1)
+        l.textColor = .secondaryLabel
+        l.textAlignment = .right
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+    private var timeLabelInstalled = false
+    /// Formats a message's `timestamp` for the swipe-reveal label. Shows the
+    /// short time for today's messages and a "M/d, h:mm a" stamp for older ones,
+    /// mirroring how iMessage labels its swiped timestamps.
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+    private static let dayTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMMd jmm")
+        return f
+    }()
+
     // MARK: - Inline image attachment views (image_spec)
     let attachmentImageView = UIImageView()
     let attachmentSpinner = UIActivityIndicatorView(style: .large)
@@ -331,6 +360,11 @@ class MessagingCell: UITableViewCell {
         timer?.invalidate()
         timer = nil
 
+        // Reset the swipe-to-reveal slide so a recycled cell doesn't carry over
+        // a mid-swipe offset, and clear the stale time text.
+        contentView.transform = .identity
+        timeLabel.text = nil
+
         // Halt any in-flight type-on reveal so a recycled cell doesn't keep
         // fading into the wrong message.
         stopTypeOnReveal()
@@ -516,6 +550,11 @@ class MessagingCell: UITableViewCell {
         if attachmentImageView.superview == nil {
             self.addViews(views: [attachmentImageView, attachmentSpinner, attachmentErrorLabel, downloadButton, retryButton])
         }
+
+        // Swipe-left reveals when this message was posted. Set on every render
+        // path (early-returns below all inherit it), so all bubble kinds slide
+        // out to the same timestamp column.
+        setTimeLabel(for: data.timestamp)
 
         // Onboarding card takes its own dedicated path: a left-aligned text
         // bubble with the prompt and an interactive card pinned underneath.
@@ -782,6 +821,46 @@ class MessagingCell: UITableViewCell {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.contentView.addSubview(view)
         }
+    }
+
+    // MARK: - Swipe-to-reveal timestamp
+
+    /// Adds `timeLabel` to the content view exactly once, pinned just past the
+    /// right edge so it's off-screen until the chat is swiped left. It rides
+    /// inside `contentView`, so translating the content view (see
+    /// `setTimeRevealOffset`) slides the bubble out and this label in together —
+    /// the whole row moves as one unit, like iMessage.
+    private func installTimeLabelIfNeeded() {
+        guard !timeLabelInstalled else { return }
+        timeLabelInstalled = true
+        // Content view must not clip, or the off-edge label is invisible even
+        // once revealed.
+        contentView.clipsToBounds = false
+        contentView.addSubview(timeLabel)
+        // Trailing is pinned past the right edge by (reveal column − inset), so
+        // at a full swipe the label settles 12pt from the edge, right-aligned —
+        // wider "older message" stamps grow leftward instead of clipping. Must
+        // stay in sync with MessagingVC.timeRevealMax.
+        NSLayoutConstraint.activate([
+            timeLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: 72 - 12),
+            timeLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+    }
+
+    /// Sets the swipe-reveal time text for this row from its message.
+    func setTimeLabel(for date: Date) {
+        installTimeLabelIfNeeded()
+        timeLabel.text = Calendar.current.isDateInToday(date)
+            ? Self.timeFormatter.string(from: date)
+            : Self.dayTimeFormatter.string(from: date)
+    }
+
+    /// Slides the whole row left by `offset` points to reveal the timestamp.
+    /// Driven by MessagingVC's pan so every visible cell moves in lock-step.
+    func setTimeRevealOffset(_ offset: CGFloat) {
+        contentView.transform = offset == 0
+            ? .identity
+            : CGAffineTransform(translationX: -offset, y: 0)
     }
     
     func attributedString(from text: String) -> NSAttributedString {

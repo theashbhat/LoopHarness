@@ -67,12 +67,19 @@ final class LoopRunnerClient {
 
     // MARK: - Public API
 
-    /// Start a new turn on the runner.
-    func startTurn(messages: [[String: String]]) async throws -> String {
+    /// Start a new turn on the runner. With `async: true` the runner persists the
+    /// turn, returns `202 {"id":...}` immediately, and finishes in the background
+    /// (the handoff path). With `async: false` the runner streams SSE — not what
+    /// this JSON-parsing method expects, so callers should keep `async: true`.
+    func startTurn(messages: [[String: String]], conversationId: String, userId: String, async: Bool = true) async throws -> String {
         var request = makeRequest(path: "/turn", method: "POST")
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: ["messages": messages]
-        )
+        let payload: [String: Any] = [
+            "messages": messages,
+            "conversation_id": conversationId,
+            "user_id": userId,
+            "async": async,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)
         try validate(response)
@@ -81,6 +88,14 @@ final class LoopRunnerClient {
             throw RunnerError.invalidResponse
         }
         return turnId
+    }
+
+    /// The stable device user id the central push backend targets (see
+    /// `PushTokenBridge` / PUSH_NOTIFICATIONS.md). Empty when analytics/push has
+    /// never run on this device — the runner then skips the completion push and
+    /// delivery falls back to the foreground poller.
+    static var deviceUserId: String {
+        UserDefaults.standard.string(forKey: "loop.analytics.user_id") ?? ""
     }
 
     /// Fetch a single turn by id.
@@ -180,7 +195,27 @@ protocol RunnerPolling {
     func pollJobs(since: Date) async throws -> (jobs: [RunnerJob], serverTime: Date)
 }
 
+/// The submit surface used by the background-handoff path. Both transports
+/// implement it so a handoff works whether the runner is reached directly,
+/// over a tunnel, or via SSH-exec.
+protocol RunnerSubmitting {
+    func startTurn(messages: [[String: String]], conversationId: String, userId: String, async: Bool) async throws -> String
+}
+
+/// Fetch a single turn by id — used by the completion-push tap and foreground
+/// reconciliation to read a handed-off turn's final response.
+protocol RunnerFetching {
+    func getTurn(id: String) async throws -> RunnerTurn
+}
+
+/// Combined transport capability — poll + submit + fetch. `makeClient` vends this
+/// so the poller can poll, hand off, and fetch without rebuilding the transport.
+protocol RunnerTransport: RunnerPolling, RunnerSubmitting, RunnerFetching {}
+
 extension LoopRunnerClient: RunnerPolling {}
+extension LoopRunnerClient: RunnerSubmitting {}
+extension LoopRunnerClient: RunnerFetching {}
+extension LoopRunnerClient: RunnerTransport {}
 
 // MARK: - ISO8601 helpers
 

@@ -166,6 +166,8 @@ struct ToolRouter {
         // Scheduler
         "schedule_task", "schedule_cron", "list_tasks", "list_crons",
         "delete_task", "delete_cron", "run_task_now",
+        // VM cron agents (recurring jobs on the SSH VM)
+        "schedule_vm_agent", "list_vm_agents", "delete_vm_agent",
         // Integration
         "list_integrations", "connect_integration", "set_api_key",
         "list_api_keys", "open_integration_settings",

@@ -54,6 +54,10 @@ func main() {
 	localtools.Register(reg)
 	devicetools.Register(reg)
 
+	if cfg.SharedSecret == "" {
+		log.Println("WARNING: shared_secret is empty — auth is DISABLED (only safe behind a private tunnel)")
+	}
+
 	// Agent
 	ag := agent.New(cfg.ModelAPIKey, reg, store)
 
@@ -68,7 +72,7 @@ func main() {
 	})
 
 	// Auth-protected endpoints
-	mux.HandleFunc("POST /turn", authMiddleware(cfg.SharedSecret, handleTurn(ag, store)))
+	mux.HandleFunc("POST /turn", authMiddleware(cfg.SharedSecret, handleTurn(ag, store, cfg.PushSendURL)))
 	mux.HandleFunc("POST /result", authMiddleware(cfg.SharedSecret, handleResult(brg)))
 	mux.HandleFunc("GET /turn/{id}", authMiddleware(cfg.SharedSecret, handleGetTurn(store)))
 	mux.HandleFunc("GET /job/{job_id}", authMiddleware(cfg.SharedSecret, handleGetJob(store)))

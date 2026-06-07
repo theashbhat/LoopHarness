@@ -483,7 +483,8 @@ class SimpleConversationManager {
             id: simpleMessage.id,
             role: simpleMessage.role,
             content: simpleMessage.content,
-            name: simpleMessage.name
+            name: simpleMessage.name,
+            timestamp: simpleMessage.createdAt
         )
         // Old NDJSON rows have no `model` field — leave the MessageStruct
         // default in place for those so behavior is unchanged for old chats.

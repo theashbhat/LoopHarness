@@ -95,6 +95,9 @@ final class SkillDispatcher {
         if MapsSkill.shared.handles(functionName: call.name) {
             MapsSkill.shared.handle(functionCall: call, completion: completion); return
         }
+        if GeocodingSkill.shared.handles(functionName: call.name) {
+            GeocodingSkill.shared.handle(functionCall: call, completion: completion); return
+        }
         if ImageSkill.shared.handles(functionName: call.name) {
             ImageSkill.shared.handle(functionCall: call, completion: completion); return
         }
@@ -130,6 +133,19 @@ final class SkillDispatcher {
         }
         if SSHSkill.shared.handles(functionName: call.name) {
             SSHSkill.shared.handle(functionCall: call, completion: completion); return
+        }
+        if VMCronSkill.shared.handles(functionName: call.name) {
+            // Like SchedulerSkill, scheduling from inside a headless scheduled
+            // run is disallowed so a task can't spawn more scheduled work.
+            if BackgroundScheduler.shared.isRunningHeadless {
+                completion(MessageStruct(
+                    role: "function",
+                    content: "{\"status\":\"blocked\",\"message\":\"VM-agent tools are unavailable inside a scheduled task run.\"}",
+                    name: call.name
+                ))
+                return
+            }
+            VMCronSkill.shared.handle(functionCall: call, completion: completion); return
         }
         if MuniRealtimeSkill.shared.handles(functionName: call.name) {
             MuniRealtimeSkill.shared.handle(functionCall: call, completion: completion); return

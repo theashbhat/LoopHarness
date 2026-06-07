@@ -45,10 +45,12 @@ final class iCloudKVSDefaults {
         "loop.modelSelection",
     ]
 
-    /// Per-provider TTS voice keys follow the pattern `ttsVoice.<provider>` —
-    /// we accept any key with this prefix in addition to the exact-match set
-    /// above.
-    private static let mirroredPrefixes: [String] = ["ttsVoice."]
+    /// Prefix-matched keys mirrored in addition to the exact-match set:
+    ///  - `ttsVoice.<provider>` — per-provider TTS voice selection.
+    ///  - `loop.ssh.` — saved SSH connection list + selected connection, so SSH
+    ///    settings follow the user across devices (the private keys themselves
+    ///    ride iCloud Keychain via the synchronizable Keychain items).
+    private static let mirroredPrefixes: [String] = ["ttsVoice.", "loop.ssh."]
 
     private let local = UserDefaults.standard
     private let kvs = NSUbiquitousKeyValueStore.default

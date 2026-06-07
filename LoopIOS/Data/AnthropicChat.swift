@@ -149,6 +149,7 @@ final class AnthropicChat {
 
         let task = streamingSession.dataTask(with: req)
         streamingSessionDelegate.register(task: task, reader: reader)
+        LocalInferenceController.shared.track(task)
         task.resume()
     }
 

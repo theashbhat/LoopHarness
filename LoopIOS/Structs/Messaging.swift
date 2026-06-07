@@ -164,6 +164,11 @@ struct MessageStruct {
     /// name (e.g. "GPT-5.5 2.6s"). `nil` for on-device Apple responses,
     /// non-streaming paths, and older persisted messages.
     var ttft: TimeInterval? = nil
+    /// When this message was posted. Defaults to the moment the struct is
+    /// created (i.e. when a live message is sent/received); reload overrides it
+    /// with the persisted `SimpleMessage.createdAt` in `messageStruct(from:)`.
+    /// Surfaced by the iMessage-style swipe-left timestamp reveal in the chat.
+    var timestamp: Date = Date()
 
     /// Explicit init that still accepts `function:` as a singular optional —
     /// keeps existing call sites compiling now that `function` is a computed
@@ -185,7 +190,8 @@ struct MessageStruct {
          onboardingCard: OnboardingCardKind? = nil,
          reasoningContent: String? = nil,
          tokenUsage: TokenUsage? = nil,
-         ttft: TimeInterval? = nil) {
+         ttft: TimeInterval? = nil,
+         timestamp: Date = Date()) {
         self.id = id
         self.role = role
         self.content = content
@@ -209,6 +215,7 @@ struct MessageStruct {
         self.reasoningContent = reasoningContent
         self.tokenUsage = tokenUsage
         self.ttft = ttft
+        self.timestamp = timestamp
     }
 
     /// Generic JSON representation of the message. Provider-specific chat
@@ -555,6 +562,7 @@ var tools: [[String: Any]] = {
     all += NotionSkill.tools
     all += SlackSkill.tools
     all += SchedulerSkill.tools
+    all += VMCronSkill.tools
     all += ExaSkill.tools
     all += URLFetchSkill.tools
     all += GitSkill.tools
@@ -564,6 +572,7 @@ var tools: [[String: Any]] = {
     all += SpecBuilderSkill.tools
     all += LocationSkill.tools
     all += MapsSkill.tools
+    all += GeocodingSkill.tools
     all += ImageSkill.tools
     all += PDFSkill.tools
     all += ObsidianSkill.tools

@@ -35,6 +35,30 @@ struct RunnerConfig: Codable, Identifiable, Equatable {
     /// True when this runner polls over the SSH host instead of a direct URL.
     var usesSSH: Bool { sshRemotePort != nil }
 
+    /// Stable id for the zero-config fallback runner derived from the default
+    /// Settings → SSH connection (see `LoopRunnerPoller.effectiveRunners`).
+    static let autoSSHID = "auto-ssh"
+
+    /// The loopback port the Go `loop-runner` listens on by default. Overridable
+    /// via UserDefaults so the fallback can target a non-default deployment.
+    static var defaultRunnerPort: Int {
+        let p = UserDefaults.standard.integer(forKey: "loop.runner.defaultPort")
+        return p > 0 ? p : 8080
+    }
+
+    /// A synthetic runner that reuses the default Settings → SSH connection as
+    /// its transport — used when the user hasn't added an explicit Loop Runner
+    /// but does have an SSH VM. `secretRef` resolves to no Keychain entry, so the
+    /// client sends an empty bearer (the runner must run with `shared_secret`
+    /// empty, i.e. auth disabled behind the tunnel).
+    static var autoSSHRunner: RunnerConfig {
+        RunnerConfig(id: autoSSHID,
+                     nickname: "My VM",
+                     baseURL: "",
+                     secretRef: "com.loop.runner.secret.\(autoSSHID)",
+                     sshRemotePort: defaultRunnerPort)
+    }
+
     init(id: String = UUID().uuidString,
          nickname: String,
          baseURL: String,
@@ -64,6 +88,9 @@ struct RunnerTurn: Codable, Identifiable, Equatable {
     let error: String?
     let createdAt: Date
     let updatedAt: Date
+    /// The originating conversation for handoff turns (empty/nil for interactive
+    /// turns). Lets the poller reconcile a completed turn into the right chat.
+    let conversationId: String?
 
     var isCompleted: Bool { status == "completed" || status == "error" }
 
@@ -74,6 +101,7 @@ struct RunnerTurn: Codable, Identifiable, Equatable {
         case error
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case conversationId = "conversation_id"
     }
 }
 

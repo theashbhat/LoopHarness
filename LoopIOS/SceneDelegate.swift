@@ -73,6 +73,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // Start the OpenClaw message poller (watches backends for new messages).
         OpenClawMessagePoller.shared.startForegroundPolling()
 
+        // Start the VM cron backstop poller (catches up missed agent results).
+        VMCronPoller.shared.startForegroundPolling()
+
         // Keep the screen on while Loop is in the foreground. The app is
         // primarily a conversational surface — locking mid-thought breaks
         // the spell. iOS restores the idle timer automatically when the app
@@ -87,6 +90,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         UIApplication.shared.isIdleTimerDisabled = false
         LoopRunnerPoller.shared.stopForegroundPolling()
         OpenClawMessagePoller.shared.stopForegroundPolling()
+        VMCronPoller.shared.stopForegroundPolling()
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
@@ -96,8 +100,31 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneDidEnterBackground(_ scene: UIScene) {
         // Called as the scene transitions from the foreground to the background.
-        // Use this method to save data, release shared resources, and store enough scene-specific state information
-        // to restore the scene back to its current state.
+        //
+        // Background handoff: if a local inference turn is in flight, hand it to a
+        // reachable Loop Runner so it finishes server-side and pushes the user
+        // back with the reply. We use `sceneDidEnterBackground` (NOT
+        // `sceneWillResignActive`) on purpose — resign also fires for Control
+        // Center, the notification shade, incoming calls, and the app-switcher
+        // peek, where the user hasn't actually left and we must not hand off.
+        //
+        // The submit may need to establish an SSH tunnel, which outlives this
+        // synchronous callback, so it runs inside a background task. The local
+        // turn is abandoned only if the submit succeeds (handled inside the VC).
+        guard let messagingVC = findMessagingVC() else {
+            MessagingVC.handoffLog.info("handoff skipped: no live MessagingVC found")
+            return
+        }
+        let app = UIApplication.shared
+        var bgTask: UIBackgroundTaskIdentifier = .invalid
+        bgTask = app.beginBackgroundTask(withName: "loop.handoff") {
+            if bgTask != .invalid { app.endBackgroundTask(bgTask); bgTask = .invalid }
+        }
+        guard bgTask != .invalid else { return }
+        Task {
+            _ = await messagingVC.handoffInFlightTurnIfEligible()
+            if bgTask != .invalid { app.endBackgroundTask(bgTask); bgTask = .invalid }
+        }
     }
     
     // MARK: - URL Handling

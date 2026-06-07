@@ -106,33 +106,55 @@ func buildToolDefs() []ToolDef {
 	}
 }
 
-// RunTurn executes a full agent turn: call LLM, dispatch tools, repeat until final message.
-func (a *Agent) RunTurn(ctx context.Context, messages []Message, conversationID string, streamFn func(string)) (string, error) {
+// PrepareTurn creates and persists a turn without running it, returning the new
+// turn id. The async (handoff) path uses this to return the id to the client
+// immediately, then runs the loop in the background via RunPreparedTurn.
+// userID / conversationID are persisted with the turn (empty for interactive
+// turns) so the async completion path can push back to the originating device.
+func (a *Agent) PrepareTurn(messages []Message, userID, conversationID string) (string, error) {
 	turnID := newID()
-
 	messagesJSON, _ := json.Marshal(messages)
-	if err := a.store.CreateTurn(turnID, messagesJSON); err != nil {
+	if err := a.store.CreateTurn(turnID, messagesJSON, userID, conversationID); err != nil {
 		return "", fmt.Errorf("persisting turn: %w", err)
 	}
+	return turnID, nil
+}
 
+// RunTurn executes a full agent turn: call LLM, dispatch tools, repeat until final message.
+func (a *Agent) RunTurn(ctx context.Context, messages []Message, userID, conversationID string, streamFn func(string)) (string, error) {
+	turnID, err := a.PrepareTurn(messages, userID, conversationID)
+	if err != nil {
+		return "", err
+	}
+	if err := a.RunPreparedTurn(ctx, turnID, messages, streamFn); err != nil {
+		return "", err
+	}
+	return turnID, nil
+}
+
+// RunPreparedTurn runs the agent loop for an already-created turn (see
+// PrepareTurn). It drives the turn to completion and records the result in
+// storage. Callers that ran PrepareTurn in a request handler can invoke this
+// in a goroutine with a detached context so the turn survives client disconnect.
+func (a *Agent) RunPreparedTurn(ctx context.Context, turnID string, messages []Message, streamFn func(string)) error {
 	// The agent loop: call LLM, handle tool calls, repeat
 	for {
 		reader, err := a.client.ChatCompletionStream(ctx, messages, a.tools)
 		if err != nil {
 			a.store.CompleteTurn(turnID, "", err.Error())
-			return "", fmt.Errorf("llm call: %w", err)
+			return fmt.Errorf("llm call: %w", err)
 		}
 
 		msg, err := reader.Collect(streamFn)
 		if err != nil {
 			a.store.CompleteTurn(turnID, "", err.Error())
-			return "", fmt.Errorf("reading stream: %w", err)
+			return fmt.Errorf("reading stream: %w", err)
 		}
 
 		// If no tool calls, this is the final response
 		if len(msg.ToolCalls) == 0 {
 			a.store.CompleteTurn(turnID, msg.Content, "")
-			return turnID, nil
+			return nil
 		}
 
 		// Dispatch tool calls in parallel

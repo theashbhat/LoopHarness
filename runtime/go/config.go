@@ -16,6 +16,11 @@ type Config struct {
 	ModelAPIKey    string `json:"model_api_key"`
 	SharedSecret   string `json:"shared_secret"`
 	ListenPort     int    `json:"listen_port"`
+
+	// PushSendURL is the central push backend endpoint the runner POSTs to when
+	// an async (handoff) turn completes, so the originating device gets an APNs
+	// alert. Defaults to the loopharness push service when unset.
+	PushSendURL string `json:"push_send_url"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -29,6 +34,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 8080
+	}
+	if cfg.PushSendURL == "" {
+		cfg.PushSendURL = "https://dev.generalbackend.com/loopharness/push/send"
 	}
 	return &cfg, nil
 }

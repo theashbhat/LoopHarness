@@ -61,13 +61,13 @@ func TestPollTurnsSinceFilter(t *testing.T) {
 	defer cleanup()
 
 	// Insert turns at staggered timestamps
-	store.CreateTurn("t1", json.RawMessage(`[{"role":"user","content":"a"}]`))
+	store.CreateTurn("t1", json.RawMessage(`[{"role":"user","content":"a"}]`), "", "")
 	time.Sleep(10 * time.Millisecond)
 	midpoint := time.Now().UTC()
 	time.Sleep(10 * time.Millisecond)
-	store.CreateTurn("t2", json.RawMessage(`[{"role":"user","content":"b"}]`))
+	store.CreateTurn("t2", json.RawMessage(`[{"role":"user","content":"b"}]`), "", "")
 	time.Sleep(10 * time.Millisecond)
-	store.CreateTurn("t3", json.RawMessage(`[{"role":"user","content":"c"}]`))
+	store.CreateTurn("t3", json.RawMessage(`[{"role":"user","content":"c"}]`), "", "")
 
 	// Poll without since — should return all 3
 	result := doGet(t, srv, "/turns")
@@ -96,9 +96,9 @@ func TestPollTurnsStatusFilter(t *testing.T) {
 	store, srv, cleanup := setupPollingTest(t)
 	defer cleanup()
 
-	store.CreateTurn("t1", json.RawMessage(`[]`))
-	store.CreateTurn("t2", json.RawMessage(`[]`))
-	store.CreateTurn("t3", json.RawMessage(`[]`))
+	store.CreateTurn("t1", json.RawMessage(`[]`), "", "")
+	store.CreateTurn("t2", json.RawMessage(`[]`), "", "")
+	store.CreateTurn("t3", json.RawMessage(`[]`), "", "")
 
 	store.CompleteTurn("t1", "done", "")
 	store.CompleteTurn("t2", "", "oops")
@@ -160,7 +160,7 @@ func TestPollTurnsLimit(t *testing.T) {
 	defer cleanup()
 
 	for i := 0; i < 5; i++ {
-		store.CreateTurn(fmt.Sprintf("t%d", i), json.RawMessage(`[]`))
+		store.CreateTurn(fmt.Sprintf("t%d", i), json.RawMessage(`[]`), "", "")
 	}
 
 	result := doGet(t, srv, "/turns?limit=2")
@@ -175,7 +175,7 @@ func TestPollJobsSinceFilter(t *testing.T) {
 	store, srv, cleanup := setupPollingTest(t)
 	defer cleanup()
 
-	store.CreateTurn("t1", json.RawMessage(`[]`))
+	store.CreateTurn("t1", json.RawMessage(`[]`), "", "")
 
 	store.CreateJob("j1", "t1", "echo", json.RawMessage(`{"text":"a"}`))
 	time.Sleep(10 * time.Millisecond)
@@ -205,7 +205,7 @@ func TestPollJobsStatusFilter(t *testing.T) {
 	store, srv, cleanup := setupPollingTest(t)
 	defer cleanup()
 
-	store.CreateTurn("t1", json.RawMessage(`[]`))
+	store.CreateTurn("t1", json.RawMessage(`[]`), "", "")
 	store.CreateJob("j1", "t1", "echo", json.RawMessage(`{}`))
 	store.CreateJob("j2", "t1", "echo", json.RawMessage(`{}`))
 	store.CreateJob("j3", "t1", "echo", json.RawMessage(`{}`))

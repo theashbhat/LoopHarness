@@ -9,6 +9,8 @@ import UIKit
 import AVFoundation
 import FoundationModels
 import QuickLook
+import os
+import UserNotifications
 
 
 enum AIState: Equatable {
@@ -72,6 +74,12 @@ class MessagingVC: UIViewController {
 
     var ai_state: AIState = .None
     let tableView = UITableView()
+    /// Drives the iMessage-style swipe-left timestamp reveal on the transcript.
+    /// Configured in the tableView setup; handled by `handleTimeRevealPan`.
+    private var timeRevealPan: UIPanGestureRecognizer!
+    /// Maximum left-slide before rubber-banding kicks in — the column width the
+    /// timestamps settle into while the swipe is held.
+    private let timeRevealMax: CGFloat = 72
     let messageBox = MessageBox()
     /// Slim pill at the top of the screen showing "N sub-agents running". Tap
     /// presents `SubAgentInspectorVC`. Collapses to zero height when no
@@ -111,6 +119,19 @@ class MessagingVC: UIViewController {
     /// Coalesces bursts of deltas into one UI update per run-loop turn.
     private var streamRenderScheduled = false
 
+    /// Log channel for the background-handoff decision path (filter Console by
+    /// category "handoff" to see why a handoff did/didn't fire on device).
+    static let handoffLog = Logger(subsystem: "com.bhat.intel", category: "handoff")
+
+    /// Token for the in-flight local inference turn, if any. Set when a local
+    /// `Cloud.connection.chat` starts; read by the background handoff so it can
+    /// mark that exact turn abandoned when it's handed off to a runner.
+    private var currentLocalTurnToken: String?
+    /// Tokens of local turns handed off to a runner. Their local completion (if
+    /// it still fires after backgrounding) must be discarded so the conversation
+    /// doesn't get both the abandoned local reply and the runner's reply.
+    private var abandonedLocalTurns: Set<String> = []
+
     /// Light tap fired when the user commits a message — a soft button-press
     /// confirmation. Kept lazy so we don't spin the haptic engine for users
     /// who never send (cold-launched into a transcript they only read).
@@ -132,6 +153,8 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
 \(NotionSkill.systemPromptFragment)
 
 \(SchedulerSkill.systemPromptFragment)
+
+\(VMCronSkill.systemPromptFragment)
 
 \(ExaSkill.systemPromptFragment)
 
@@ -610,6 +633,16 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             self,
             selector: #selector(handleOpenClawMediaDidAttach(_:)),
             name: .openClawMediaDidAttach,
+            object: nil
+        )
+
+        // A handed-off local turn finished on a runner and its reply was written
+        // into a conversation — reload if it's the one on screen so the message
+        // appears without the user having to re-open the chat.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleRunnerTurnApplied(_:)),
+            name: .runnerTurnApplied,
             object: nil
         )
 
@@ -1147,11 +1180,14 @@ extension MessagingVC: MessageBoxDelegate {
         let reqConvId = conversation.id
         let context = self.contextMessages(for: reqConvId)
         self.beginStreamingTurn()
+        let localTurnToken = UUID().uuidString
+        self.currentLocalTurnToken = localTurnToken
         Cloud.connection.chat(messages: context, onPartial: self.streamingPartialHandler(for: reqConvId)) { responseMessage, error in
           // Fires off-main (URLSession delegate queue); ai_state / self.messages
           // are read by the table on main, so all mutation runs on main to avoid
           // racing the streaming render (see startReply for the full rationale).
           DispatchQueue.main.async {
+            if self.discardIfHandedOff(localTurnToken, reqConvId) { return }
             if self.currentConversationEntity?.id == reqConvId {
                 self.ai_state = .None
             }
@@ -1329,11 +1365,16 @@ extension MessagingVC: MessageBoxDelegate {
 
         let initialContext = self.chatContextMessages
         self.beginStreamingTurn()
+        let localTurnToken = UUID().uuidString
+        self.currentLocalTurnToken = localTurnToken
         Cloud.connection.chat(messages: initialContext, onPartial: self.streamingPartialHandler(for: requestConversationId)) { responseMessage, error in
           // Fires off-main (URLSession delegate queue); ai_state / self.messages
           // are read by the table on main, so all mutation runs on main to avoid
           // racing the streaming render (see startReply for the full rationale).
           DispatchQueue.main.async {
+            // If this turn was handed off to a runner when the app backgrounded,
+            // discard the local result — the runner's reply will arrive via push.
+            if self.discardIfHandedOff(localTurnToken, requestConversationId) { return }
             if self.currentConversationEntity?.id == requestConversationId {
                 self.ai_state = .None
             }
@@ -1438,6 +1479,108 @@ extension MessagingVC: MessageBoxDelegate {
     
     func stopSpeech() {
         stopSpeaking()
+    }
+
+    // MARK: - Background handoff to a Loop Runner
+
+    /// Returns true (and cleans up) if the local turn `token` was handed off to a
+    /// runner while in flight — the caller should then discard its local result.
+    private func discardIfHandedOff(_ token: String, _ conversationId: String) -> Bool {
+        guard abandonedLocalTurns.remove(token) != nil else { return false }
+        if currentConversationEntity?.id == conversationId { ai_state = .None }
+        ActiveRequestTracker.shared.markIdle(conversationId)
+        if currentLocalTurnToken == token { currentLocalTurnToken = nil }
+        return true
+    }
+
+    /// Plain user/assistant text history for the active conversation, prefixed
+    /// with the system prompt, in the runner's `{role, content}` shape. Tool
+    /// calls, function results, and attachments are dropped — the runner speaks
+    /// plain OpenAI chat messages only.
+    private func handoffPayload(for conversationId: String) -> [[String: String]] {
+        var payload: [[String: String]] = [["role": "system", "content": base_system_prompt]]
+        for m in contextMessages(for: conversationId) {
+            guard m.role == "user" || m.role == "assistant" else { continue }
+            guard !m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            payload.append(["role": m.role, "content": m.content])
+        }
+        return payload
+    }
+
+    /// Called when the app backgrounds. If a local turn is in flight in a local
+    /// conversation and a runner is reachable, hand the turn off to the runner to
+    /// finish (it pushes back on completion) and abandon the local result.
+    /// Returns true only when a handoff was actually submitted — the local turn
+    /// is abandoned ONLY then, so a failed handoff never drops the only reply.
+    func handoffInFlightTurnIfEligible() async -> Bool {
+        // Read VC state + build the payload on main — these touch state the table
+        // view also reads, so we must not race them from the background Task. We
+        // also hard-cancel local inference HERE (before awaiting the submit) and
+        // mark the turn abandoned, so the un-cancellable local request can't
+        // finish first and "win." If the submit then fails we surface a notice
+        // (below), since we've already stopped the local turn.
+        let prep: (token: String, convId: String, messages: [[String: String]])? = await MainActor.run {
+            guard self.ai_state != .None else {
+                Self.handoffLog.info("handoff skipped: no turn in flight (ai_state == .None)")
+                return nil
+            }
+            guard let token = self.currentLocalTurnToken else {
+                Self.handoffLog.info("handoff skipped: no local turn token")
+                return nil
+            }
+            guard let convId = self.activeRequestConversationId else {
+                Self.handoffLog.info("handoff skipped: no active request conversation")
+                return nil
+            }
+            guard let conv = self.conversationManager.getConversation(by: convId) else {
+                Self.handoffLog.info("handoff skipped: conversation not found")
+                return nil
+            }
+            guard conv.backendKind != .remote else {
+                Self.handoffLog.info("handoff skipped: conversation is remote (already runs on a VM)")
+                return nil
+            }
+            let messages = self.handoffPayload(for: convId)
+            guard messages.count > 1 else {
+                Self.handoffLog.info("handoff skipped: no user turn to send")
+                return nil
+            }
+            // Stop local inference now and mark the turn abandoned so its
+            // (cancelled) completion is discarded rather than written.
+            self.abandonedLocalTurns.insert(token)
+            let cancelled = LocalInferenceController.shared.cancelActive()
+            self.ai_state = .None
+            ActiveRequestTracker.shared.markIdle(convId)
+            self.tableView.reloadData()
+            Self.handoffLog.info("handoff eligible — local inference cancelled: \(cancelled, privacy: .public)")
+            return (token, convId, messages)
+        }
+        guard let prep = prep else { return false }
+
+        let userId = LoopRunnerClient.deviceUserId
+        Self.handoffLog.info("handoff submitting (user_id set: \(!userId.isEmpty, privacy: .public))")
+        guard let result = await LoopRunnerPoller.shared.submitHandoff(
+            messages: prep.messages, conversationId: prep.convId, userId: userId) else {
+            // We already cancelled local — leave a notice so the chat isn't stuck
+            // with a user message and no reply.
+            let reason = LoopRunnerPoller.shared.lastHandoffError ?? "couldn't reach your VM"
+            Self.handoffLog.error("handoff submit failed: \(reason, privacy: .public)")
+            await MainActor.run {
+                guard let conv = self.conversationManager.getConversation(by: prep.convId) else { return }
+                let notice = MessageStruct(role: "assistant",
+                    content: "⚠️ Couldn't continue on your VM: \(reason)")
+                self.conversationManager.addMessage(notice, to: conv)
+                if self.currentConversationEntity?.id == prep.convId {
+                    self.currentConversationEntity = self.conversationManager.getConversation(by: prep.convId)
+                    self.loadMessagesFromConversation(conv, refreshIfRemote: false)
+                }
+            }
+            return false
+        }
+
+        RunnerTurnApplier.recordHandoff(turnId: result.turnId, conversationId: prep.convId, model: result.model)
+        Self.handoffLog.info("handoff submitted to \(result.runner.nickname, privacy: .public) [\(result.model, privacy: .public)]: turn \(result.turnId, privacy: .public)")
+        return true
     }
 
     /// Resolves the shimmer label copy for a model-emitted function call.
@@ -1850,6 +1993,13 @@ extension MessagingVC: MessageBoxDelegate {
             }
             conversationManager.addMessage(message, to: conversation)
 
+            // Backgrounded: the user can't see the bubble land or hear the
+            // TTS (which we skip — see playMessageSynthesizer), so post a local
+            // notification announcing the reply finished.
+            if isBackgrounded {
+                postReplyNotification(for: message, conversationId: conversation.id)
+            }
+
             if !isViewing {
                 // Response arrived for a chat the user has navigated away from.
                 // Surface a green dot on the hamburger so they know there's
@@ -1995,6 +2145,8 @@ extension MessagingVC: MessageBoxDelegate {
         let reqConvId = conversation.id
         let context = self.contextMessages(for: reqConvId)
         self.beginStreamingTurn()
+        let localTurnToken = UUID().uuidString
+        self.currentLocalTurnToken = localTurnToken
         Cloud.connection.chat(messages: context, onPartial: streamingPartialHandler(for: reqConvId)) { [weak self] responseMessage, error in
             // Fires on URLSession's delegate queue. `ai_state` and
             // `self.messages` are read by the table view on the main thread
@@ -2005,6 +2157,7 @@ extension MessagingVC: MessageBoxDelegate {
             // updates detected".
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                if self.discardIfHandedOff(localTurnToken, reqConvId) { return }
                 if self.currentConversationEntity?.id == reqConvId {
                     self.ai_state = .None
                 }
@@ -2065,6 +2218,43 @@ extension MessagingVC: MessageBoxDelegate {
     /// is safe.
     private static let speechSanitizer = SpeechSanitizer()
     
+    /// True when the app is in the background. Read on main (UIApplication's
+    /// `applicationState` is main-thread-only); all callers here run on main.
+    private var isBackgrounded: Bool {
+        UIApplication.shared.applicationState == .background
+    }
+
+    /// Drop a local notification announcing the assistant's reply finished while
+    /// the app was backgrounded. Best-effort: if notification permission hasn't
+    /// been granted we silently bail (asking from a background completion
+    /// handler would be rude). Mirrors `SubAgentNotifications.deliver`.
+    private func postReplyNotification(for message: MessageStruct, conversationId: String) {
+        let body = MessagingVC.speechSanitizer.sanitize(message.content)
+        let preview = body.isEmpty ? message.content : body
+        guard !preview.isEmpty else { return }
+
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            var granted = settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional
+            if settings.authorizationStatus == .ephemeral { granted = true }
+            guard granted else { return }
+
+            let content = UNMutableNotificationContent()
+            content.title = "Loop"
+            content.body = String(preview.prefix(200))
+            content.sound = .default
+            content.userInfo = ["type": "assistant_reply", "conversation_id": conversationId]
+
+            let request = UNNotificationRequest(
+                identifier: "loop.reply.\(message.id)",
+                content: content,
+                trigger: nil // fire immediately
+            )
+            center.add(request, withCompletionHandler: nil)
+        }
+    }
+
     func playMessageSynthesizer(message: MessageStruct) {
         // Onboarding messages are scripted UI, not assistant speech. Speaking
         // them would be jarring (and TTS isn't even configured yet at this
@@ -2079,6 +2269,15 @@ extension MessagingVC: MessageBoxDelegate {
             // No speech will play, but the assistant's turn IS complete —
             // drop the avatar back to idle so it doesn't sit in the
             // thinking state forever.
+            VoiceLoopCoordinator.shared.setState(.idle)
+            return
+        }
+
+        // Backgrounded: skip audio. Cloud TTS opens a second network request
+        // that iOS suspends once the app leaves the foreground, so it usually
+        // fails — and the user can't hear it anyway. The reply itself is
+        // surfaced via a local notification from `processMessage`.
+        if isBackgrounded {
             VoiceLoopCoordinator.shared.setState(.idle)
             return
         }
@@ -2679,6 +2878,14 @@ extension MessagingVC {
         // Improve scrolling performance
         tableView.delaysContentTouches = false
         // tableView.canCancelContentTouches = true
+
+        // iMessage-style swipe-left to reveal each message's posted time. One
+        // pan on the table drives every visible cell's slide in lock-step (see
+        // `handleTimeRevealPan`), so the whole transcript moves as one.
+        timeRevealPan = UIPanGestureRecognizer(target: self, action: #selector(handleTimeRevealPan(_:)))
+        timeRevealPan.delegate = self
+        tableView.addGestureRecognizer(timeRevealPan)
+
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow(_:)), name: UIResponder.keyboardWillShowNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
 
@@ -3216,10 +3423,64 @@ extension MessagingVC: MessagingCellToolDelegate {
     }
 }
 
+// MARK: - Swipe-to-reveal timestamps (iMessage-style)
+
+extension MessagingVC {
+    /// Translates every visible cell's content left in lock-step as the user
+    /// swipes, sliding the bubbles out and the trailing time labels in. Releases
+    /// spring back to rest. Vertical scrolling is locked for the duration so the
+    /// reveal stays a clean horizontal motion, like iMessage.
+    @objc func handleTimeRevealPan(_ pan: UIPanGestureRecognizer) {
+        switch pan.state {
+        case .began:
+            tableView.isScrollEnabled = false
+            applyTimeReveal(rubberBanded(max(0, -pan.translation(in: tableView).x)))
+        case .changed:
+            applyTimeReveal(rubberBanded(max(0, -pan.translation(in: tableView).x)))
+        case .ended, .cancelled, .failed:
+            tableView.isScrollEnabled = true
+            UIView.animate(withDuration: 0.32, delay: 0,
+                           usingSpringWithDamping: 0.82, initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) {
+                self.applyTimeReveal(0)
+            }
+        default:
+            break
+        }
+    }
+
+    /// Applies the same slide offset to all on-screen message cells.
+    private func applyTimeReveal(_ offset: CGFloat) {
+        for case let cell as MessagingCell in tableView.visibleCells {
+            cell.setTimeRevealOffset(offset)
+        }
+    }
+
+    /// Eases the slide past `timeRevealMax` so an over-pull feels resistive
+    /// rather than tracking the finger 1:1.
+    private func rubberBanded(_ raw: CGFloat) -> CGFloat {
+        guard raw > timeRevealMax else { return raw }
+        return timeRevealMax + (raw - timeRevealMax) * 0.18
+    }
+}
+
 // MARK: - UIGestureRecognizerDelegate
 
 extension MessagingVC: UIGestureRecognizerDelegate {
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        // The timestamp-reveal pan only engages on a predominantly horizontal,
+        // leftward drag — vertical drags fall through to normal scrolling.
+        if gestureRecognizer == timeRevealPan {
+            let v = timeRevealPan.velocity(in: tableView)
+            return v.x < 0 && abs(v.x) > abs(v.y)
+        }
+        return true
+    }
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // The reveal pan must coexist with the table's own scroll pan so it
+        // isn't blocked from starting.
+        if gestureRecognizer == timeRevealPan { return true }
         // Don't allow simultaneous recognition with the side drawer's pan gesture
         if let sideDrawerPan = sideDrawer?.panGestureRecognizer, otherGestureRecognizer == sideDrawerPan {
             return false
@@ -3229,6 +3490,9 @@ extension MessagingVC: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // The reveal pan accepts touches anywhere on the transcript; only the
+        // side-drawer edge pan is restricted to the left edge.
+        if gestureRecognizer == timeRevealPan { return true }
         // Only respond to touches that start near the left edge and when side drawer is not open
         let location = touch.location(in: view)
         return location.x <= 20 && sideDrawer == nil
@@ -4150,6 +4414,18 @@ extension MessagingVC: SubAgentStatusBarDelegate {
     @objc func handleOpenClawMediaDidAttach(_ notification: Notification) {
         guard ai_state == .None,
               let conversationId = notification.userInfo?["conversationId"] as? String,
+              let current = currentConversationEntity, current.id == conversationId,
+              let refreshed = conversationManager.getConversation(by: conversationId) else { return }
+        currentConversationEntity = refreshed
+        loadMessagesFromConversation(refreshed, refreshIfRemote: false)
+    }
+
+    /// A handed-off local turn finished on a runner and its reply was written
+    /// into a conversation. Reload if it's the one on screen. Gated on idle so we
+    /// never reload mid-stream (which can trip "Invalid batch updates detected").
+    @objc func handleRunnerTurnApplied(_ notification: Notification) {
+        guard ai_state == .None,
+              let conversationId = notification.userInfo?["conversation_id"] as? String,
               let current = currentConversationEntity, current.id == conversationId,
               let refreshed = conversationManager.getConversation(by: conversationId) else { return }
         currentConversationEntity = refreshed

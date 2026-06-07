@@ -79,6 +79,9 @@ final class SettingsVC: UIViewController {
             Row(title: "Scheduled", icon: "calendar.badge.clock") { settings in
                 settings.navigationController?.pushViewController(ScheduledTasksVC(), animated: true)
             },
+            Row(title: "VM Agents", icon: "clock.arrow.2.circlepath") { settings in
+                settings.navigationController?.pushViewController(VMCronTasksVC(), animated: true)
+            },
             Row(title: "Subagents", icon: "hammer") { settings in
                 settings.navigationController?.pushViewController(SubagentsListVC(), animated: true)
             },
