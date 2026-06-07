@@ -291,6 +291,11 @@ final class RunnerEditVC: UIViewController {
             if let error = error {
                 os_log(.error, "Notification auth error: %{public}@", error.localizedDescription)
             }
+            // Now that the user has authorized, obtain the APNs token and
+            // register it with the backend immediately (don't wait for next launch).
+            if granted {
+                PushRegistration.shared.registerIfAuthorized()
+            }
         }
     }
 

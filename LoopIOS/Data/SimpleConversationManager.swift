@@ -368,8 +368,10 @@ class SimpleConversationManager {
             imageAttachment: imageAttachmentString,
             // Persist model attribution so reload paths can show the same
             // "Apple LLM" / "GPT 5.5 Instant" badge that the live append
-            // path renders. Only meaningful for assistant turns.
-            model: messageStruct.role == "assistant" ? messageStruct.model : nil,
+            // path renders. Only meaningful for assistant turns. User turns
+            // reuse this column to carry the dictation byline ("Deepgram STT"/"Apple STT"),
+            // which is otherwise unused for the user side.
+            model: messageStruct.role == "assistant" ? messageStruct.model : messageStruct.sttEngine,
             isCompactionSummary: messageStruct.isCompactionSummary ? true : nil,
             responseSeconds: messageStruct.role == "assistant" ? messageStruct.ttft : nil,
             createdAt: createdAt
@@ -488,8 +490,14 @@ class SimpleConversationManager {
         )
         // Old NDJSON rows have no `model` field — leave the MessageStruct
         // default in place for those so behavior is unchanged for old chats.
+        // User rows reuse this column for the dictation byline (see
+        // `toSimpleMessage`), so route it back to `sttEngine` there.
         if let stored = simpleMessage.model, !stored.isEmpty {
-            messageStruct.model = stored
+            if simpleMessage.role == "user" {
+                messageStruct.sttEngine = stored
+            } else {
+                messageStruct.model = stored
+            }
         }
         // Persisted response time renders next to the model name (e.g. "… 2.6s").
         if let seconds = simpleMessage.responseSeconds {

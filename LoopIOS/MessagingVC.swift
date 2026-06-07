@@ -1273,7 +1273,7 @@ extension MessagingVC: MessageBoxDelegate {
         }
     }
 
-    func didSendMessageText(_ message: String) {
+    func didSendMessageText(_ message: String, sttEngine: String?) {
         // Cancel any in-flight TTS immediately — the user just sent a new
         // message, so continuing to speak the previous response is stale.
         stopSpeaking()
@@ -1300,6 +1300,9 @@ extension MessagingVC: MessageBoxDelegate {
         let stagedAttachment = self.messageBox.pendingAttachment
         var messageStruct = MessageStruct(role: "user", content: message)
         messageStruct.fileAttachment = stagedAttachment
+        // Dictated messages carry the STT engine ("Deepgram STT"/"Apple STT") so the cell can
+        // show a transcription byline under the user bubble; nil when typed.
+        messageStruct.sttEngine = sttEngine
 
         // Clear the staged attachment immediately so the chip + paperclip
         // bounce back the moment the send tap registers, even before the

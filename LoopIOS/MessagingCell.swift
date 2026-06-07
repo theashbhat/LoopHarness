@@ -728,17 +728,40 @@ class MessagingCell: UITableViewCell {
             animatingtextView.isHidden = true
             actionButton.isHidden = true
             shimmerLabel.isHidden = true
-            modelLabel.isHidden = true
-            
+
+            // Dictation byline ("Deepgram STT"/"Apple STT") under the user bubble, reusing
+            // `modelLabel`. When present it drives the cell bottom; otherwise
+            // the text view pins to the bottom as before.
+            let sttByline = data.sttEngine?.trimmingCharacters(in: .whitespaces)
+            let hasSTTByline = !(sttByline ?? "").isEmpty
+            modelLabel.isHidden = !hasSTTByline
+
             // Store and activate text view constraints for user messages
             textViewConstraints = [
                 textView.trailingAnchor.constraint(equalTo: self.contentView.trailingAnchor, constant: -10),
                 textView.topAnchor.constraint(equalTo: self.contentView.topAnchor, constant: 6),
                 textView.widthAnchor.constraint(lessThanOrEqualTo: self.contentView.widthAnchor, multiplier: 0.8, constant: -40),
-                textView.bottomAnchor.constraint(equalTo: self.contentView.bottomAnchor, constant: -6)
             ]
-            
+            if !hasSTTByline {
+                textViewConstraints.append(
+                    textView.bottomAnchor.constraint(equalTo: self.contentView.bottomAnchor, constant: -6)
+                )
+            }
             NSLayoutConstraint.activate(textViewConstraints)
+
+            if hasSTTByline {
+                modelLabel.text = sttByline
+                modelLabel.textColor = .secondaryLabel
+                modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+                modelLabel.numberOfLines = 1
+                baseModelText = sttByline
+                modelLabelConstraints = [
+                    modelLabel.trailingAnchor.constraint(equalTo: textView.trailingAnchor, constant: -2),
+                    modelLabel.topAnchor.constraint(equalTo: textView.bottomAnchor, constant: 2),
+                    self.contentView.bottomAnchor.constraint(equalTo: modelLabel.bottomAnchor, constant: 6),
+                ]
+                NSLayoutConstraint.activate(modelLabelConstraints)
+            }
             animatingtextView.alpha = 0
             textView.alpha = 1
             textView.textContainerInset = .init(top: 8, left: 10, bottom: 8, right: 10)

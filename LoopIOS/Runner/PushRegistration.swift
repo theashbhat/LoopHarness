@@ -2,21 +2,26 @@
 //  PushRegistration.swift
 //  Loop
 //
-//  APNs device-token registration hooks. This is the client half of the planned
-//  push-on-completion path: it obtains an APNs device token and persists it, so a
-//  future VM-side sender can wake the app (silent `content-available`) or alert
-//  the user when a long-running agent turn finishes while the app is backgrounded.
+//  APNs device-token registration hooks. This is the client half of the
+//  push-on-completion path: it obtains an APNs device token, persists it, and
+//  registers it with the loopharness push backend so a VM-side sender (e.g. a
+//  cron finishing on the VM) can alert the user when a long-running agent turn
+//  finishes while the app is backgrounded.
 //
-//  The VM-side sender is intentionally NOT built yet — `transmitToVM(token:)` is a
-//  documented stub. Registration is also inert by default: we only call
-//  `registerForRemoteNotifications()` when the user has ALREADY granted
-//  notification authorization (the scheduler/runner local-notification flows
-//  request it), so this adds no new permission prompt and changes no behavior.
+//  Registration is inert by default: we only call `registerForRemoteNotifications()`
+//  when the user has ALREADY granted notification authorization (the
+//  scheduler/runner local-notification flows request it), so this adds no new
+//  permission prompt. Backend transmission goes through `PushBridge`, whose
+//  concrete sender lives in the gitignored `LoopIOS/Private/` folder — so public
+//  clones (no sender compiled in) retain the token locally and post nothing.
 //
 //  Wiring points (AppDelegate):
 //    - didFinishLaunchingWithOptions -> registerIfAuthorized()
-//    - didRegisterForRemoteNotificationsWithDeviceToken -> store + transmitToVM
+//    - didRegisterForRemoteNotificationsWithDeviceToken -> store + registerWithBackend
 //    - didFailToRegisterForRemoteNotificationsWithError  -> log
+//
+//  Call `registerIfAuthorized()` again right after a notification-permission
+//  grant to obtain the token immediately rather than on the next launch.
 //
 
 import Foundation
@@ -60,26 +65,70 @@ final class PushRegistration {
         #endif
     }
 
-    /// Stores the token and (eventually) hands it to the VM. Called from
+    /// Stores the token and hands it to the backend. Called from
     /// `didRegisterForRemoteNotificationsWithDeviceToken`.
     func didRegister(deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
         UserDefaults.standard.set(hex, forKey: Self.tokenKey)
         Self.log.info("APNs device token registered (\(hex.count, privacy: .public) hex chars)")
-        transmitToVM(token: hex)
+        registerWithBackend(token: hex)
     }
 
     func didFailToRegister(error: Error) {
         Self.log.error("APNs registration failed: \(error.localizedDescription, privacy: .public)")
     }
 
-    // MARK: - Stub: transmit to VM (sender deferred)
+    // MARK: - Backend registration
 
-    /// Intended contract (NOT yet implemented): POST the device token to the VM
-    /// over the persistent tunnel (e.g. `POST /device-token` on the Go runner)
-    /// so a VM-side sender holding the APNs `.p8` key can push on turn/job
-    /// completion. For now this only logs — there is no VM endpoint or sender.
-    private func transmitToVM(token: String) {
-        Self.log.info("transmitToVM: deferred — no VM sender yet (token retained locally)")
+    /// Hands the device token to `PushBridge`, which (when its private sender is
+    /// present) upserts it on the loopharness push backend at
+    /// `POST /loopharness/push/register`. Also emits an app signal for analytics.
+    private func registerWithBackend(token: String) {
+        let environment = Self.apnsEnvironment()
+        PushBridge.register(token: token, environment: environment)
+        AppSignals.emit("push_token_registered", ["environment": environment])
+        Self.log.info("push token handed to bridge (env: \(environment, privacy: .public))")
+    }
+
+    // MARK: - APNs environment
+
+    /// The backend `environment` string for this build's APNs token:
+    /// "sandbox" for development APNs, "production" for production APNs. The
+    /// backend uses it to pick the matching APNs host when sending.
+    ///
+    /// Resolved from the embedded provisioning profile's `aps-environment`
+    /// entitlement when available (development -> sandbox, production ->
+    /// production). App Store builds carry no embedded profile, so they fall
+    /// back to the compile-time configuration (Release -> production). Xcode
+    /// dev builds resolve to sandbox; TestFlight/App Store to production.
+    static func apnsEnvironment() -> String {
+        if let aps = apsEnvironmentFromProvisioning() {
+            return aps == "production" ? "production" : "sandbox"
+        }
+        #if DEBUG
+        return "sandbox"
+        #else
+        return "production"
+        #endif
+    }
+
+    /// Parse `aps-environment` out of the embedded mobileprovision, if present.
+    private static func apsEnvironmentFromProvisioning() -> String? {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let raw = String(data: data, encoding: .ascii),
+              let start = raw.range(of: "<plist"),
+              let end = raw.range(of: "</plist>") else {
+            return nil
+        }
+        let plistString = String(raw[start.lowerBound..<end.upperBound])
+        guard let plistData = plistString.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: plistData, options: [], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let aps = entitlements["aps-environment"] as? String else {
+            return nil
+        }
+        return aps
     }
 }
