@@ -138,6 +138,10 @@ struct MessageStruct {
     /// `show_places_on_map`. Cell renders an inline MKMapView with annotations
     /// that callout to Apple Maps. Synchronous — no `.generating` lifecycle.
     var mapAttachment: MapAttachment? = nil
+    /// HTML story infographic (1080×1920 portrait). Set by StoryGenerationService
+    /// when the model calls `generate_story`. Renders as a scaled card in chat;
+    /// tap opens the full-screen story player with tap-to-advance navigation.
+    var storyAttachment: StoryAttachment? = nil
     /// Set when this message belongs to the conversational onboarding flow.
     /// Drives `MessagingCell` to render an interactive card (text field,
     /// choice buttons, key paste, etc.) under the message body. Onboarding
@@ -192,6 +196,7 @@ struct MessageStruct {
          pdfAttachment: PDFAttachment? = nil,
          fileAttachment: FileAttachment? = nil,
          mapAttachment: MapAttachment? = nil,
+         storyAttachment: StoryAttachment? = nil,
          onboardingCard: OnboardingCardKind? = nil,
          reasoningContent: String? = nil,
          tokenUsage: TokenUsage? = nil,
@@ -217,6 +222,7 @@ struct MessageStruct {
         self.pdfAttachment = pdfAttachment
         self.fileAttachment = fileAttachment
         self.mapAttachment = mapAttachment
+        self.storyAttachment = storyAttachment
         self.onboardingCard = onboardingCard
         self.reasoningContent = reasoningContent
         self.tokenUsage = tokenUsage
