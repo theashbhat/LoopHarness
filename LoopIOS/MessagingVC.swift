@@ -1606,6 +1606,9 @@ extension MessagingVC: MessageBoxDelegate {
         if let s = TwitterSkill.shared.statusText(for: call) { return s }
         if let s = SSHSkill.shared.statusText(for: call) { return s }
         if let s = MuniRealtimeSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleDriveSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleGmailSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
         #if canImport(HealthKit) && os(iOS)
         if let s = HealthSkill.shared.statusText(for: call) { return s }
         #endif

@@ -130,6 +130,9 @@ final class AgentHarness {
             ("Devin",            "Dispatch coding tasks to Devin cloud agents (opens PRs, live transcript)", DevinSkill.tools),
             ("X (Twitter)",      "Post tweets to X (Twitter) with confirmation", TwitterSkill.tools),
             ("SSH",              "Execute shell commands on a remote host via SSH", SSHSkill.tools),
+            ("Google Drive",     "Search, read, and create files in Google Drive", GoogleDriveSkill.tools),
+            ("Google Gmail",     "Search, read, and send emails via Gmail", GoogleGmailSkill.tools),
+            ("Google Calendar",  "List and create events on Google Calendar (REST API)", GoogleCalendarSkill.tools),
         ]
         #if canImport(HealthKit) && os(iOS)
         catalog.append(("Apple Health", "Read-only access to steps, distance, workouts, heart rate, sleep, body mass", HealthSkill.tools))
@@ -166,6 +169,9 @@ final class AgentHarness {
             DevinSkill.systemPromptFragment,
             TwitterSkill.systemPromptFragment,
             SSHSkill.systemPromptFragment,
+            GoogleDriveSkill.systemPromptFragment,
+            GoogleGmailSkill.systemPromptFragment,
+            GoogleCalendarSkill.systemPromptFragment,
         ]
         #if canImport(HealthKit) && os(iOS)
         fragments.append(HealthSkill.systemPromptFragment)
