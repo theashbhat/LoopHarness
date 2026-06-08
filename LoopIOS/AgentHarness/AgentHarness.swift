@@ -137,6 +137,9 @@ final class AgentHarness {
         #if canImport(HealthKit) && os(iOS)
         catalog.append(("Apple Health", "Read-only access to steps, distance, workouts, heart rate, sleep, body mass", HealthSkill.tools))
         #endif
+        #if os(iOS) || os(macOS)
+        catalog.append(("Stories", "Generate a 1080×1920 animated HTML story / infographic that renders as a tappable card", StorySkill.tools))
+        #endif
         return catalog
     }()
 
@@ -175,6 +178,9 @@ final class AgentHarness {
         ]
         #if canImport(HealthKit) && os(iOS)
         fragments.append(HealthSkill.systemPromptFragment)
+        #endif
+        #if os(iOS) || os(macOS)
+        fragments.append(StorySkill.systemPromptFragment)
         #endif
         self.toolsDoc = fragments.joined(separator: "\n\n")
         self.staticToolsDocLength = toolsDoc.count

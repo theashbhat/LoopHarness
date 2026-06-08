@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=1080, height=1920, initial-scale=1.0">
+<meta name="viewport" content="width=1080">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
@@ -240,41 +240,67 @@ html, body {
   const scenes = document.querySelectorAll('.scene');
   const totalScenes = scenes.length;
 
+  // Defensive accessors so a slightly-off payload degrades gracefully
+  // instead of rendering "undefined" / "NaN%".
+  function pick() {
+    for (var i = 0; i < arguments.length; i++) {
+      var v = arguments[i];
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+    return '';
+  }
+  function progressPct(g) {
+    var cur = Number(pick(g.current, g.value, g.progress, 0));
+    var tgt = Number(pick(g.target, g.goal, g.max));
+    var pct;
+    if (isFinite(tgt) && tgt > 0) pct = (cur / tgt) * 100;
+    else pct = Number(pick(g.percent, g.pct, g.progress, 0)); // already a percentage
+    if (!isFinite(pct)) pct = 0;
+    return Math.max(0, Math.min(100, Math.round(pct)));
+  }
+
   function init(data) {
+    data = data || {};
     // Title scene
     if (data.emoji) document.getElementById('heroEmoji').textContent = data.emoji;
     if (data.title) document.getElementById('titleText').textContent = data.title;
     if (data.subtitle) document.getElementById('subtitleText').textContent = data.subtitle;
 
-    // Stats grid
+    // Stats grid (accepts `stats` or `metrics`)
     const grid = document.getElementById('statGrid');
-    (data.stats || []).forEach(function(s) {
+    (data.stats || data.metrics || []).forEach(function(s) {
+      if (!s) return;
       const card = document.createElement('div');
       card.className = 'stat-card';
-      card.innerHTML = '<div class="stat-emoji">' + (s.emoji || '📈') + '</div>' +
-        '<div class="stat-value">' + s.value + '</div>' +
-        '<div class="stat-label">' + s.label + '</div>';
+      card.innerHTML = '<div class="stat-emoji">' + (s.emoji || s.icon || '📈') + '</div>' +
+        '<div class="stat-value">' + pick(s.value, s.count, s.amount) + '</div>' +
+        '<div class="stat-label">' + pick(s.label, s.name, s.title) + '</div>';
       grid.appendChild(card);
     });
 
-    // Progress bars
+    // Progress bars (accepts `goals` or `progress`)
     const progressContainer = document.getElementById('progressItems');
-    (data.goals || []).forEach(function(g) {
+    (data.goals || data.progress || []).forEach(function(g) {
+      if (!g) return;
       const item = document.createElement('div');
       item.className = 'progress-item';
-      const pct = Math.min(100, Math.round((g.current / g.target) * 100));
-      item.innerHTML = '<div class="progress-label"><span>' + g.label + '</span><span>' + pct + '%</span></div>' +
+      const pct = progressPct(g);
+      item.innerHTML = '<div class="progress-label"><span>' + pick(g.label, g.name, g.title) + '</span><span>' + pct + '%</span></div>' +
         '<div class="progress-bar"><div class="progress-fill" style="--fill:' + pct + '%"></div></div>';
       progressContainer.appendChild(item);
     });
 
-    // Highlights
+    // Highlights (accepts array of strings OR objects with text/title/label)
     const list = document.getElementById('highlightsList');
-    (data.highlights || []).forEach(function(h) {
+    (data.highlights || data.items || []).forEach(function(h) {
+      if (h === undefined || h === null) return;
+      const txt = (typeof h === 'string') ? h : pick(h.text, h.title, h.label, h.description, h.name);
+      if (!txt) return;
+      const em = (typeof h === 'object' && h) ? (h.emoji || h.icon || '⭐') : '⭐';
       const item = document.createElement('div');
       item.className = 'highlight-item';
-      item.innerHTML = '<div class="highlight-emoji">' + (h.emoji || '⭐') + '</div>' +
-        '<div class="highlight-text">' + h.text + '</div>';
+      item.innerHTML = '<div class="highlight-emoji">' + em + '</div>' +
+        '<div class="highlight-text">' + txt + '</div>';
       list.appendChild(item);
     });
 

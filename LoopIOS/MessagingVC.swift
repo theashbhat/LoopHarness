@@ -472,6 +472,9 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // Same plumbing for PDFGenerationService — placeholder card on
         // submit, swap to ready/failed when the WKWebView render finishes.
         PDFGenerationService.shared.host = self
+        // And for StoryGenerationService — placeholder story card on submit,
+        // swap to ready/failed when the HTML story render finishes.
+        StoryGenerationService.shared.host = self
         // CalendarSkill needs a UI host so it can present
         // EKEventEditViewController for the user to review proposed events
         // before they're saved.
@@ -1611,6 +1614,9 @@ extension MessagingVC: MessageBoxDelegate {
         if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
         #if canImport(HealthKit) && os(iOS)
         if let s = HealthSkill.shared.statusText(for: call) { return s }
+        #endif
+        #if os(iOS)
+        if let s = StorySkill.shared.statusText(for: call) { return s }
         #endif
         if let s = DynamicSkillRegistry.shared.statusText(for: call) { return s }
 
@@ -3278,6 +3284,9 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         // matter — moved up here to keep all three together.
         cell.imageDelegate = self
         cell.pdfDelegate = self
+        #if os(iOS)
+        cell.storyDelegate = self
+        #endif
         cell.onboardingDelegate = self
         configureToolDisclosure(for: cell, message: message)
         cell.setData(data: message, shouldAnimate: message.id == self.messageIdToAnimate)
@@ -4226,6 +4235,103 @@ extension MessagingVC: MessagingCellPDFDelegate {
         return url
     }
 }
+
+// MARK: - StorySkillHost
+
+#if os(iOS)
+extension MessagingVC: StorySkillHost {
+
+    func storySkillDidStartGenerating(_ attachment: StoryAttachment) {
+        // Retry path: a placeholder for this id already exists — flip its
+        // state back to .generating in place.
+        if let idx = self.messages.firstIndex(where: { $0.storyAttachment?.id == attachment.id }) {
+            self.messages[idx].storyAttachment = attachment
+            DispatchQueue.main.async {
+                self.reloadStoryRow(attachmentId: attachment.id)
+            }
+            return
+        }
+
+        let placeholder = MessageStruct(
+            id: "story-\(attachment.id)",
+            role: "assistant",
+            content: "",
+            model: "loop-story",
+            storyAttachment: attachment
+        )
+        let conversation = ensureCurrentConversation()
+        conversationManager.addMessage(placeholder, to: conversation)
+        currentConversationEntity = conversationManager.currentConversation
+        self.messages.append(placeholder)
+        DispatchQueue.main.async {
+            self.tableView.reloadData()
+            self.scrollToLastMessage()
+        }
+    }
+
+    func storySkillDidFinishGenerating(_ attachment: StoryAttachment) {
+        // Find the placeholder and mutate its attachment in place so the
+        // card flips spinner → ready without losing scroll position.
+        guard let idx = self.messages.firstIndex(where: { $0.storyAttachment?.id == attachment.id }) else {
+            return
+        }
+        self.messages[idx].storyAttachment = attachment
+        DispatchQueue.main.async {
+            self.reloadStoryRow(attachmentId: attachment.id)
+        }
+    }
+
+    /// Reload the row carrying a story attachment, guarding against the
+    /// table/data-source row-count drift that happens when a render finishes
+    /// mid-stream (the same drift `renderStreamingPartial` defends against).
+    /// On any mismatch — or if the row isn't currently in `visible_messages` —
+    /// fall back to a full reload so we never trip "Invalid batch updates".
+    private func reloadStoryRow(attachmentId: String) {
+        let expectedRows = visible_messages.count + (ai_state != .None ? 1 : 0)
+        guard tableView.numberOfRows(inSection: 0) == expectedRows,
+              let visibleIdx = visible_messages.firstIndex(where: { $0.storyAttachment?.id == attachmentId })
+        else {
+            tableView.reloadData()
+            return
+        }
+        tableView.reloadRows(at: [IndexPath(row: visibleIdx, section: 0)], with: .none)
+    }
+}
+
+// MARK: - MessagingCellStoryDelegate
+
+extension MessagingVC: MessagingCellStoryDelegate {
+
+    func messagingCellDidTapStory(attachmentId: String) {
+        guard let attachment = self.messages
+                .first(where: { $0.storyAttachment?.id == attachmentId })?
+                .storyAttachment,
+              attachment.status == .ready,
+              let url = attachment.fileURL,
+              FileManager.default.fileExists(atPath: url.path)
+        else { return }
+        let player = StoryPlayerVC()
+        player.storyAttachment = attachment
+        player.modalPresentationStyle = .fullScreen
+        present(player, animated: true)
+    }
+
+    func messagingCellDidTapStoryRetry(attachmentId: String) {
+        guard let attachment = self.messages
+                .first(where: { $0.storyAttachment?.id == attachmentId })?
+                .storyAttachment
+        else { return }
+        let convId = conversationManager.currentConversation?.id
+        StoryGenerationService.shared.submit(
+            title: attachment.title,
+            template: attachment.template,
+            jsonPayload: attachment.jsonPayload,
+            attachmentId: attachment.id,
+            conversationId: convId
+        )
+    }
+}
+#endif
 
 // MARK: - SlashCommandHost
 

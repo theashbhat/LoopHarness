@@ -1,0 +1,786 @@
+//
+//  StoryBundledTemplates.swift
+//  Loop
+//
+//  The story HTML templates, embedded as Swift string constants.
+//
+//  Xcode's file-system synchronized groups don't reliably copy .html files
+//  into the app bundle, so loading the templates from Bundle.main can fail at
+//  runtime. Embedding them here as raw string literals makes the renderer
+//  self-contained and works across every target. The source-of-truth files
+//  still live in Stories/Templates/ for editing; regenerate this file from
+//  them when they change (see the repo note in StoryGenerator).
+//
+
+import Foundation
+
+enum StoryBundledTemplates {
+    /// Returns the embedded HTML for a template, or nil if unknown.
+    static func html(for template: StoryAttachment.Template) -> String? {
+        switch template {
+        case .dailyRecap:      return dailyRecap
+        case .activitySummary: return activitySummary
+        }
+    }
+
+    static let dailyRecap = #"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1080">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 1080px;
+  height: 1920px;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+  background: linear-gradient(160deg, #0a0a1a 0%, #1a1a3e 50%, #0d0d2b 100%);
+  color: #ffffff;
+}
+
+.scene {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 80px 60px;
+  opacity: 0;
+  transform: translateY(40px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  pointer-events: none;
+}
+.scene.active {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Scene 1: Title */
+.scene-title .emoji-hero {
+  font-size: 160px;
+  margin-bottom: 40px;
+  animation: bounce 2s ease infinite;
+}
+.scene-title h1 {
+  font-size: 72px;
+  font-weight: 800;
+  letter-spacing: -2px;
+  text-align: center;
+  margin-bottom: 24px;
+}
+.scene-title .subtitle {
+  font-size: 36px;
+  color: rgba(255,255,255,0.6);
+  text-align: center;
+}
+
+/* Scene 2: Stats */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+  width: 100%;
+  max-width: 900px;
+}
+.stat-card {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 32px;
+  padding: 48px 36px;
+  text-align: center;
+  opacity: 0;
+  transform: scale(0.8);
+  animation: popIn 0.5s ease forwards;
+}
+.stat-card:nth-child(1) { animation-delay: 0.1s; }
+.stat-card:nth-child(2) { animation-delay: 0.2s; }
+.stat-card:nth-child(3) { animation-delay: 0.3s; }
+.stat-card:nth-child(4) { animation-delay: 0.4s; }
+.stat-card .stat-emoji { font-size: 56px; margin-bottom: 16px; }
+.stat-card .stat-value {
+  font-size: 64px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #60a5fa, #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.stat-card .stat-label {
+  font-size: 28px;
+  color: rgba(255,255,255,0.5);
+  margin-top: 8px;
+}
+
+/* Scene 3: Progress */
+.progress-section {
+  width: 100%;
+  max-width: 900px;
+}
+.progress-section h2 {
+  font-size: 48px;
+  font-weight: 700;
+  margin-bottom: 48px;
+  text-align: center;
+}
+.progress-item {
+  margin-bottom: 40px;
+  opacity: 0;
+  transform: translateX(-30px);
+  animation: slideIn 0.5s ease forwards;
+}
+.progress-item:nth-child(2) { animation-delay: 0.2s; }
+.progress-item:nth-child(3) { animation-delay: 0.4s; }
+.progress-item:nth-child(4) { animation-delay: 0.6s; }
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 32px;
+  margin-bottom: 16px;
+}
+.progress-bar {
+  height: 24px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 12px;
+  background: linear-gradient(90deg, #60a5fa, #a78bfa);
+  width: 0%;
+  animation: fillBar 1s ease forwards;
+  animation-delay: 0.3s;
+}
+
+/* Scene 4: Highlights */
+.highlights-list {
+  width: 100%;
+  max-width: 900px;
+}
+.highlights-list h2 {
+  font-size: 48px;
+  font-weight: 700;
+  margin-bottom: 48px;
+  text-align: center;
+}
+.highlight-item {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 32px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 24px;
+  margin-bottom: 20px;
+  opacity: 0;
+  transform: translateY(20px);
+  animation: fadeUp 0.4s ease forwards;
+}
+.highlight-item:nth-child(2) { animation-delay: 0.15s; }
+.highlight-item:nth-child(3) { animation-delay: 0.3s; }
+.highlight-item:nth-child(4) { animation-delay: 0.45s; }
+.highlight-item:nth-child(5) { animation-delay: 0.6s; }
+.highlight-emoji { font-size: 48px; }
+.highlight-text { font-size: 32px; line-height: 1.4; }
+
+/* Keyframes */
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-20px); }
+}
+@keyframes popIn {
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes slideIn {
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes fadeUp {
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fillBar {
+  to { width: var(--fill); }
+}
+
+/* Progress dots */
+.progress-dots {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 16px;
+}
+.dot {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.3);
+  transition: background 0.3s, transform 0.3s;
+}
+.dot.active {
+  background: #60a5fa;
+  transform: scale(1.3);
+}
+</style>
+</head>
+<body>
+
+<!-- Scene 1: Title -->
+<div class="scene scene-title active" data-scene="0">
+  <div class="emoji-hero" id="heroEmoji">📊</div>
+  <h1 id="titleText">Daily Recap</h1>
+  <div class="subtitle" id="subtitleText">Here's your day at a glance</div>
+</div>
+
+<!-- Scene 2: Stats Grid -->
+<div class="scene" data-scene="1">
+  <div class="stat-grid" id="statGrid"></div>
+</div>
+
+<!-- Scene 3: Progress Bars -->
+<div class="scene" data-scene="2">
+  <div class="progress-section">
+    <h2>Goals Progress</h2>
+    <div id="progressItems"></div>
+  </div>
+</div>
+
+<!-- Scene 4: Highlights -->
+<div class="scene" data-scene="3">
+  <div class="highlights-list">
+    <h2>✨ Highlights</h2>
+    <div id="highlightsList"></div>
+  </div>
+</div>
+
+<!-- Navigation dots -->
+<div class="progress-dots" id="dots"></div>
+
+<script>
+// Template: DailyRecap
+// Expects JSON payload with: title, subtitle, emoji, stats[], goals[], highlights[]
+(function() {
+  let currentScene = 0;
+  const scenes = document.querySelectorAll('.scene');
+  const totalScenes = scenes.length;
+
+  // Defensive accessors so a slightly-off payload degrades gracefully
+  // instead of rendering "undefined" / "NaN%".
+  function pick() {
+    for (var i = 0; i < arguments.length; i++) {
+      var v = arguments[i];
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+    return '';
+  }
+  function progressPct(g) {
+    var cur = Number(pick(g.current, g.value, g.progress, 0));
+    var tgt = Number(pick(g.target, g.goal, g.max));
+    var pct;
+    if (isFinite(tgt) && tgt > 0) pct = (cur / tgt) * 100;
+    else pct = Number(pick(g.percent, g.pct, g.progress, 0)); // already a percentage
+    if (!isFinite(pct)) pct = 0;
+    return Math.max(0, Math.min(100, Math.round(pct)));
+  }
+
+  function init(data) {
+    data = data || {};
+    // Title scene
+    if (data.emoji) document.getElementById('heroEmoji').textContent = data.emoji;
+    if (data.title) document.getElementById('titleText').textContent = data.title;
+    if (data.subtitle) document.getElementById('subtitleText').textContent = data.subtitle;
+
+    // Stats grid (accepts `stats` or `metrics`)
+    const grid = document.getElementById('statGrid');
+    (data.stats || data.metrics || []).forEach(function(s) {
+      if (!s) return;
+      const card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = '<div class="stat-emoji">' + (s.emoji || s.icon || '📈') + '</div>' +
+        '<div class="stat-value">' + pick(s.value, s.count, s.amount) + '</div>' +
+        '<div class="stat-label">' + pick(s.label, s.name, s.title) + '</div>';
+      grid.appendChild(card);
+    });
+
+    // Progress bars (accepts `goals` or `progress`)
+    const progressContainer = document.getElementById('progressItems');
+    (data.goals || data.progress || []).forEach(function(g) {
+      if (!g) return;
+      const item = document.createElement('div');
+      item.className = 'progress-item';
+      const pct = progressPct(g);
+      item.innerHTML = '<div class="progress-label"><span>' + pick(g.label, g.name, g.title) + '</span><span>' + pct + '%</span></div>' +
+        '<div class="progress-bar"><div class="progress-fill" style="--fill:' + pct + '%"></div></div>';
+      progressContainer.appendChild(item);
+    });
+
+    // Highlights (accepts array of strings OR objects with text/title/label)
+    const list = document.getElementById('highlightsList');
+    (data.highlights || data.items || []).forEach(function(h) {
+      if (h === undefined || h === null) return;
+      const txt = (typeof h === 'string') ? h : pick(h.text, h.title, h.label, h.description, h.name);
+      if (!txt) return;
+      const em = (typeof h === 'object' && h) ? (h.emoji || h.icon || '⭐') : '⭐';
+      const item = document.createElement('div');
+      item.className = 'highlight-item';
+      item.innerHTML = '<div class="highlight-emoji">' + em + '</div>' +
+        '<div class="highlight-text">' + txt + '</div>';
+      list.appendChild(item);
+    });
+
+    // Dots
+    const dotsEl = document.getElementById('dots');
+    for (let i = 0; i < totalScenes; i++) {
+      const dot = document.createElement('div');
+      dot.className = 'dot' + (i === 0 ? ' active' : '');
+      dotsEl.appendChild(dot);
+    }
+  }
+
+  function goToScene(index) {
+    if (index < 0 || index >= totalScenes) return;
+    scenes[currentScene].classList.remove('active');
+    currentScene = index;
+    scenes[currentScene].classList.add('active');
+    // Update dots
+    document.querySelectorAll('.dot').forEach(function(d, i) {
+      d.classList.toggle('active', i === currentScene);
+    });
+  }
+
+  function advance() {
+    if (currentScene < totalScenes - 1) goToScene(currentScene + 1);
+  }
+
+  function retreat() {
+    if (currentScene > 0) goToScene(currentScene - 1);
+  }
+
+  // Tap zones: left 30% = back, right 70% = forward
+  document.addEventListener('click', function(e) {
+    if (e.clientX < 1080 * 0.3) retreat();
+    else advance();
+  });
+
+  // Auto-advance timeline (4s per scene)
+  let autoTimer = null;
+  function startAutoPlay() {
+    autoTimer = setInterval(function() {
+      if (currentScene < totalScenes - 1) advance();
+      else clearInterval(autoTimer);
+    }, 4000);
+  }
+
+  // Exposed for native bridge
+  window.StoryBridge = {
+    init: init,
+    advance: advance,
+    retreat: retreat,
+    goToScene: goToScene,
+    startAutoPlay: startAutoPlay,
+    stopAutoPlay: function() { if (autoTimer) clearInterval(autoTimer); },
+    getCurrentScene: function() { return currentScene; },
+    getTotalScenes: function() { return totalScenes; }
+  };
+
+  // If data is embedded in the page (for standalone viewing)
+  if (window.__STORY_DATA__) {
+    init(window.__STORY_DATA__);
+    startAutoPlay();
+  }
+})();
+</script>
+</body>
+</html>
+"""#
+
+    static let activitySummary = #"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1080">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 1080px;
+  height: 1920px;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+  background: linear-gradient(160deg, #0d1b0e 0%, #1a3d1f 50%, #0a2a0d 100%);
+  color: #ffffff;
+}
+
+.scene {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 80px 60px;
+  opacity: 0;
+  transform: translateY(40px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  pointer-events: none;
+}
+.scene.active {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Scene 1: Hero */
+.hero-icon {
+  font-size: 180px;
+  margin-bottom: 32px;
+  animation: pulse 2s ease infinite;
+}
+.hero-title {
+  font-size: 80px;
+  font-weight: 800;
+  letter-spacing: -3px;
+  text-align: center;
+  background: linear-gradient(135deg, #4ade80, #22d3ee);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 16px;
+}
+.hero-subtitle {
+  font-size: 36px;
+  color: rgba(255,255,255,0.6);
+  text-align: center;
+}
+
+/* Scene 2: Key metrics (big numbers) */
+.metric-stack {
+  width: 100%;
+  max-width: 900px;
+}
+.metric-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 36px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  opacity: 0;
+  animation: fadeIn 0.4s ease forwards;
+}
+.metric-row:nth-child(1) { animation-delay: 0.1s; }
+.metric-row:nth-child(2) { animation-delay: 0.25s; }
+.metric-row:nth-child(3) { animation-delay: 0.4s; }
+.metric-row:nth-child(4) { animation-delay: 0.55s; }
+.metric-row:last-child { border-bottom: none; }
+.metric-left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.metric-emoji { font-size: 48px; }
+.metric-label { font-size: 34px; color: rgba(255,255,255,0.7); }
+.metric-value {
+  font-size: 52px;
+  font-weight: 700;
+  color: #4ade80;
+}
+.metric-unit {
+  font-size: 28px;
+  color: rgba(255,255,255,0.4);
+  margin-left: 8px;
+}
+
+/* Scene 3: Ring chart */
+.ring-container {
+  position: relative;
+  width: 500px;
+  height: 500px;
+  margin-bottom: 48px;
+}
+.ring-svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.ring-bg { fill: none; stroke: rgba(255,255,255,0.1); stroke-width: 40; }
+.ring-fill {
+  fill: none;
+  stroke-width: 40;
+  stroke-linecap: round;
+  stroke-dasharray: 1256;
+  stroke-dashoffset: 1256;
+  animation: ringDraw 1.5s ease forwards;
+  animation-delay: 0.3s;
+}
+.ring-center {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+.ring-pct {
+  font-size: 96px;
+  font-weight: 800;
+  color: #4ade80;
+}
+.ring-label {
+  font-size: 32px;
+  color: rgba(255,255,255,0.5);
+}
+.ring-caption {
+  font-size: 34px;
+  color: rgba(255,255,255,0.7);
+  text-align: center;
+  max-width: 700px;
+}
+
+/* Scene 4: Timeline */
+.timeline {
+  width: 100%;
+  max-width: 900px;
+}
+.timeline h2 {
+  font-size: 48px;
+  font-weight: 700;
+  margin-bottom: 48px;
+  text-align: center;
+}
+.timeline-item {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 32px;
+  opacity: 0;
+  animation: slideUp 0.4s ease forwards;
+}
+.timeline-item:nth-child(2) { animation-delay: 0.1s; }
+.timeline-item:nth-child(3) { animation-delay: 0.2s; }
+.timeline-item:nth-child(4) { animation-delay: 0.3s; }
+.timeline-item:nth-child(5) { animation-delay: 0.4s; }
+.timeline-item:nth-child(6) { animation-delay: 0.5s; }
+.timeline-dot {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: #4ade80;
+  margin-top: 8px;
+  flex-shrink: 0;
+}
+.timeline-content {}
+.timeline-time {
+  font-size: 26px;
+  color: rgba(255,255,255,0.4);
+  margin-bottom: 4px;
+}
+.timeline-text {
+  font-size: 32px;
+  line-height: 1.4;
+}
+
+/* Keyframes */
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+@keyframes slideUp {
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes ringDraw {
+  to { stroke-dashoffset: var(--ring-offset); }
+}
+
+/* Progress dots */
+.progress-dots {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 16px;
+}
+.dot {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.3);
+  transition: background 0.3s, transform 0.3s;
+}
+.dot.active {
+  background: #4ade80;
+  transform: scale(1.3);
+}
+</style>
+</head>
+<body>
+
+<!-- Scene 1: Hero -->
+<div class="scene active" data-scene="0">
+  <div class="hero-icon" id="heroIcon">🏃‍♂️</div>
+  <div class="hero-title" id="heroTitle">Activity</div>
+  <div class="hero-subtitle" id="heroSubtitle">Your workout summary</div>
+</div>
+
+<!-- Scene 2: Key Metrics -->
+<div class="scene" data-scene="1">
+  <div class="metric-stack" id="metricStack"></div>
+</div>
+
+<!-- Scene 3: Ring/Goal -->
+<div class="scene" data-scene="2">
+  <div class="ring-container">
+    <svg class="ring-svg" viewBox="0 0 440 440">
+      <circle class="ring-bg" cx="220" cy="220" r="200"/>
+      <circle class="ring-fill" id="ringFill" cx="220" cy="220" r="200"/>
+    </svg>
+    <div class="ring-center">
+      <div class="ring-pct" id="ringPct">0%</div>
+      <div class="ring-label" id="ringLabel">of goal</div>
+    </div>
+  </div>
+  <div class="ring-caption" id="ringCaption"></div>
+</div>
+
+<!-- Scene 4: Timeline -->
+<div class="scene" data-scene="3">
+  <div class="timeline">
+    <h2>🕐 Timeline</h2>
+    <div id="timelineList"></div>
+  </div>
+</div>
+
+<!-- Navigation dots -->
+<div class="progress-dots" id="dots"></div>
+
+<script>
+// Template: ActivitySummary
+// Expects: { title, subtitle, icon, metrics[], goal: { current, target, label, caption }, timeline[] }
+(function() {
+  let currentScene = 0;
+  const scenes = document.querySelectorAll('.scene');
+  const totalScenes = scenes.length;
+
+  // Defensive accessors so a slightly-off payload degrades gracefully
+  // instead of rendering "undefined" / "NaN%".
+  function pick() {
+    for (var i = 0; i < arguments.length; i++) {
+      var v = arguments[i];
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+    return '';
+  }
+  function goalPct(g) {
+    var cur = Number(pick(g.current, g.value, g.progress, 0));
+    var tgt = Number(pick(g.target, g.goal, g.max));
+    var pct;
+    if (isFinite(tgt) && tgt > 0) pct = (cur / tgt) * 100;
+    else pct = Number(pick(g.percent, g.pct, g.progress, 0));
+    if (!isFinite(pct)) pct = 0;
+    return Math.max(0, Math.min(100, Math.round(pct)));
+  }
+
+  function init(data) {
+    data = data || {};
+    if (data.icon) document.getElementById('heroIcon').textContent = data.icon;
+    if (data.title) document.getElementById('heroTitle').textContent = data.title;
+    if (data.subtitle) document.getElementById('heroSubtitle').textContent = data.subtitle;
+
+    // Metrics (accepts `metrics` or `stats`)
+    const stack = document.getElementById('metricStack');
+    (data.metrics || data.stats || []).forEach(function(m) {
+      if (!m) return;
+      const row = document.createElement('div');
+      row.className = 'metric-row';
+      row.innerHTML = '<div class="metric-left"><span class="metric-emoji">' + (m.emoji || m.icon || '📊') + '</span>' +
+        '<span class="metric-label">' + pick(m.label, m.name, m.title) + '</span></div>' +
+        '<div><span class="metric-value">' + pick(m.value, m.count, m.amount) + '</span>' +
+        (m.unit ? '<span class="metric-unit">' + m.unit + '</span>' : '') + '</div>';
+      stack.appendChild(row);
+    });
+
+    // Ring (accepts `goal` or `ring`)
+    const goal = data.goal || data.ring;
+    if (goal) {
+      const pct = goalPct(goal);
+      const circumference = 2 * Math.PI * 200; // ~1256
+      const offset = circumference - (circumference * pct / 100);
+      const ring = document.getElementById('ringFill');
+      ring.style.setProperty('--ring-offset', offset);
+      ring.style.stroke = pct >= 100 ? '#4ade80' : '#22d3ee';
+      document.getElementById('ringPct').textContent = pct + '%';
+      const rl = pick(goal.label, goal.name); if (rl) document.getElementById('ringLabel').textContent = rl;
+      const rc = pick(goal.caption, goal.subtitle); if (rc) document.getElementById('ringCaption').textContent = rc;
+    }
+
+    // Timeline (accepts array of strings OR objects with text/title/label)
+    const list = document.getElementById('timelineList');
+    (data.timeline || data.events || []).forEach(function(t) {
+      if (t === undefined || t === null) return;
+      const txt = (typeof t === 'string') ? t : pick(t.text, t.title, t.label, t.description);
+      if (!txt) return;
+      const time = (typeof t === 'object' && t) ? pick(t.time, t.when, t.timestamp) : '';
+      const item = document.createElement('div');
+      item.className = 'timeline-item';
+      item.innerHTML = '<div class="timeline-dot"></div><div class="timeline-content">' +
+        '<div class="timeline-time">' + time + '</div>' +
+        '<div class="timeline-text">' + txt + '</div></div>';
+      list.appendChild(item);
+    });
+
+    // Dots
+    const dotsEl = document.getElementById('dots');
+    for (let i = 0; i < totalScenes; i++) {
+      const dot = document.createElement('div');
+      dot.className = 'dot' + (i === 0 ? ' active' : '');
+      dotsEl.appendChild(dot);
+    }
+  }
+
+  function goToScene(index) {
+    if (index < 0 || index >= totalScenes) return;
+    scenes[currentScene].classList.remove('active');
+    currentScene = index;
+    scenes[currentScene].classList.add('active');
+    document.querySelectorAll('.dot').forEach(function(d, i) {
+      d.classList.toggle('active', i === currentScene);
+    });
+  }
+
+  function advance() { if (currentScene < totalScenes - 1) goToScene(currentScene + 1); }
+  function retreat() { if (currentScene > 0) goToScene(currentScene - 1); }
+
+  document.addEventListener('click', function(e) {
+    if (e.clientX < 1080 * 0.3) retreat();
+    else advance();
+  });
+
+  let autoTimer = null;
+  function startAutoPlay() {
+    autoTimer = setInterval(function() {
+      if (currentScene < totalScenes - 1) advance();
+      else clearInterval(autoTimer);
+    }, 4000);
+  }
+
+  window.StoryBridge = {
+    init: init,
+    advance: advance,
+    retreat: retreat,
+    goToScene: goToScene,
+    startAutoPlay: startAutoPlay,
+    stopAutoPlay: function() { if (autoTimer) clearInterval(autoTimer); },
+    getCurrentScene: function() { return currentScene; },
+    getTotalScenes: function() { return totalScenes; }
+  };
+
+  if (window.__STORY_DATA__) {
+    init(window.__STORY_DATA__);
+    startAutoPlay();
+  }
+})();
+</script>
+</body>
+</html>
+"""#
+}

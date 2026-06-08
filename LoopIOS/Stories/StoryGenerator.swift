@@ -43,21 +43,23 @@ final class StoryGenerator {
             throw GenerationError.invalidJSON
         }
 
-        // Load template HTML from bundle
-        guard let templateURL = Bundle.main.url(forResource: template.rawValue,
-                                                 withExtension: "html",
-                                                 subdirectory: "StoryTemplates"),
-              let templateHTML = try? String(contentsOf: templateURL, encoding: .utf8) else {
-            // Fallback: try loading from the Stories/Templates directory in bundle
-            guard let fallbackURL = Bundle.main.url(forResource: template.rawValue,
-                                                     withExtension: "html"),
-                  let fallbackHTML = try? String(contentsOf: fallbackURL, encoding: .utf8) else {
-                throw GenerationError.templateNotFound(template.rawValue)
-            }
-            return try renderAndWrite(html: fallbackHTML, json: jsonPayload, outputDir: outputDirectory)
+        // Templates are embedded as Swift constants (StoryBundledTemplates)
+        // because Xcode's synchronized groups don't copy .html into the app
+        // bundle. Prefer the embedded copy; fall back to a bundled resource
+        // if one is ever added so editing-via-bundle still works.
+        if let embedded = StoryBundledTemplates.html(for: template) {
+            return try renderAndWrite(html: embedded, json: jsonPayload, outputDir: outputDirectory)
         }
 
-        return try renderAndWrite(html: templateHTML, json: jsonPayload, outputDir: outputDirectory)
+        if let templateURL = Bundle.main.url(forResource: template.rawValue,
+                                             withExtension: "html",
+                                             subdirectory: "StoryTemplates")
+            ?? Bundle.main.url(forResource: template.rawValue, withExtension: "html"),
+           let templateHTML = try? String(contentsOf: templateURL, encoding: .utf8) {
+            return try renderAndWrite(html: templateHTML, json: jsonPayload, outputDir: outputDirectory)
+        }
+
+        throw GenerationError.templateNotFound(template.rawValue)
     }
 
     /// Inject the JSON data into the template and write to disk.

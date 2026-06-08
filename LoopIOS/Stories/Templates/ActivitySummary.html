@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=1080, height=1920, initial-scale=1.0">
+<meta name="viewport" content="width=1080">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
@@ -262,44 +262,70 @@ html, body {
   const scenes = document.querySelectorAll('.scene');
   const totalScenes = scenes.length;
 
+  // Defensive accessors so a slightly-off payload degrades gracefully
+  // instead of rendering "undefined" / "NaN%".
+  function pick() {
+    for (var i = 0; i < arguments.length; i++) {
+      var v = arguments[i];
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+    return '';
+  }
+  function goalPct(g) {
+    var cur = Number(pick(g.current, g.value, g.progress, 0));
+    var tgt = Number(pick(g.target, g.goal, g.max));
+    var pct;
+    if (isFinite(tgt) && tgt > 0) pct = (cur / tgt) * 100;
+    else pct = Number(pick(g.percent, g.pct, g.progress, 0));
+    if (!isFinite(pct)) pct = 0;
+    return Math.max(0, Math.min(100, Math.round(pct)));
+  }
+
   function init(data) {
+    data = data || {};
     if (data.icon) document.getElementById('heroIcon').textContent = data.icon;
     if (data.title) document.getElementById('heroTitle').textContent = data.title;
     if (data.subtitle) document.getElementById('heroSubtitle').textContent = data.subtitle;
 
-    // Metrics
+    // Metrics (accepts `metrics` or `stats`)
     const stack = document.getElementById('metricStack');
-    (data.metrics || []).forEach(function(m) {
+    (data.metrics || data.stats || []).forEach(function(m) {
+      if (!m) return;
       const row = document.createElement('div');
       row.className = 'metric-row';
-      row.innerHTML = '<div class="metric-left"><span class="metric-emoji">' + (m.emoji || '📊') + '</span>' +
-        '<span class="metric-label">' + m.label + '</span></div>' +
-        '<div><span class="metric-value">' + m.value + '</span>' +
+      row.innerHTML = '<div class="metric-left"><span class="metric-emoji">' + (m.emoji || m.icon || '📊') + '</span>' +
+        '<span class="metric-label">' + pick(m.label, m.name, m.title) + '</span></div>' +
+        '<div><span class="metric-value">' + pick(m.value, m.count, m.amount) + '</span>' +
         (m.unit ? '<span class="metric-unit">' + m.unit + '</span>' : '') + '</div>';
       stack.appendChild(row);
     });
 
-    // Ring
-    if (data.goal) {
-      const pct = Math.min(100, Math.round((data.goal.current / data.goal.target) * 100));
+    // Ring (accepts `goal` or `ring`)
+    const goal = data.goal || data.ring;
+    if (goal) {
+      const pct = goalPct(goal);
       const circumference = 2 * Math.PI * 200; // ~1256
       const offset = circumference - (circumference * pct / 100);
       const ring = document.getElementById('ringFill');
       ring.style.setProperty('--ring-offset', offset);
       ring.style.stroke = pct >= 100 ? '#4ade80' : '#22d3ee';
       document.getElementById('ringPct').textContent = pct + '%';
-      if (data.goal.label) document.getElementById('ringLabel').textContent = data.goal.label;
-      if (data.goal.caption) document.getElementById('ringCaption').textContent = data.goal.caption;
+      const rl = pick(goal.label, goal.name); if (rl) document.getElementById('ringLabel').textContent = rl;
+      const rc = pick(goal.caption, goal.subtitle); if (rc) document.getElementById('ringCaption').textContent = rc;
     }
 
-    // Timeline
+    // Timeline (accepts array of strings OR objects with text/title/label)
     const list = document.getElementById('timelineList');
-    (data.timeline || []).forEach(function(t) {
+    (data.timeline || data.events || []).forEach(function(t) {
+      if (t === undefined || t === null) return;
+      const txt = (typeof t === 'string') ? t : pick(t.text, t.title, t.label, t.description);
+      if (!txt) return;
+      const time = (typeof t === 'object' && t) ? pick(t.time, t.when, t.timestamp) : '';
       const item = document.createElement('div');
       item.className = 'timeline-item';
       item.innerHTML = '<div class="timeline-dot"></div><div class="timeline-content">' +
-        '<div class="timeline-time">' + (t.time || '') + '</div>' +
-        '<div class="timeline-text">' + t.text + '</div></div>';
+        '<div class="timeline-time">' + time + '</div>' +
+        '<div class="timeline-text">' + txt + '</div></div>';
       list.appendChild(item);
     });
 

@@ -164,6 +164,11 @@ final class SkillDispatcher {
             HealthSkill.shared.handle(functionCall: call, completion: completion); return
         }
         #endif
+        #if os(iOS)
+        if StorySkill.shared.handles(functionName: call.name) {
+            StorySkill.shared.handle(functionCall: call, completion: completion); return
+        }
+        #endif
 
         // Runtime-registered skills (Mac-only). Checked under the lock so a
         // concurrent register() can't tear the iteration.

@@ -8,12 +8,12 @@
 //  and notifies the host on completion.
 //
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
 import Foundation
-import UIKit
 
-/// Implemented by MessagingVC (or the demo VC) to receive story lifecycle events.
+/// Implemented by MessagingVC (iOS) or ConversationWindowController (Mac) to
+/// receive story lifecycle events.
 protocol StorySkillHost: AnyObject {
     func storySkillDidStartGenerating(_ attachment: StoryAttachment)
     func storySkillDidFinishGenerating(_ attachment: StoryAttachment)

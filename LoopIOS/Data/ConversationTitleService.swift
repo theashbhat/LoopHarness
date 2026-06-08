@@ -153,7 +153,7 @@ final class ConversationTitleService {
         guard msg.role == role else { return false }
         guard !msg.content.isEmpty else { return false }
         guard msg.onboardingCard == nil else { return false }
-        if msg.id.hasPrefix("image-") || msg.id.hasPrefix("pdf-") { return false }
+        if msg.id.hasPrefix("image-") || msg.id.hasPrefix("pdf-") || msg.id.hasPrefix("story-") { return false }
         return true
     }
 

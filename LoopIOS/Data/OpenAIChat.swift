@@ -286,7 +286,7 @@ final class OpenAIChat {
             // Identifier prefix is the authoritative signal — set by the
             // skill that inserted the placeholder, not derivable from any
             // user-controlled content.
-            if m.id.hasPrefix("image-") || m.id.hasPrefix("pdf-") { return false }
+            if m.id.hasPrefix("image-") || m.id.hasPrefix("pdf-") || m.id.hasPrefix("story-") { return false }
             return true
         }
     }

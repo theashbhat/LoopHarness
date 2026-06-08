@@ -507,6 +507,10 @@ Tips:
         case .xAccessToken:           return "x_access_token"
         case .xAccessTokenSecret:     return "x_access_token_secret"
         case .sfBayTransit:           return "sf_bay_transit"
+        case .googleWorkspaceAccessToken:  return "google_workspace_access_token"
+        case .googleWorkspaceRefreshToken: return "google_workspace_refresh_token"
+        case .googleWorkspaceClientId:     return "google_workspace_client_id"
+        case .googleWorkspaceClientSecret: return "google_workspace_client_secret"
         }
     }
 
