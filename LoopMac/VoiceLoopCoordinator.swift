@@ -888,6 +888,15 @@ The current date and time is \(now).
         if CursorSkill.shared.handles(functionName: function.name) {
             CursorSkill.shared.handle(functionCall: function, completion: cont); return
         }
+        if GoogleDriveSkill.shared.handles(functionName: function.name) {
+            GoogleDriveSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if GoogleGmailSkill.shared.handles(functionName: function.name) {
+            GoogleGmailSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if GoogleCalendarSkill.shared.handles(functionName: function.name) {
+            GoogleCalendarSkill.shared.handle(functionCall: function, completion: cont); return
+        }
         // Dynamic (user-authored JS) skills last — hot-loaded so the
         // registry is the source of truth for what's currently available.
         if DynamicSkillRegistry.shared.handles(functionName: function.name) {
@@ -917,6 +926,9 @@ The current date and time is \(now).
         if let s = SubAgentSkill.shared.statusText(for: call) { return s }
         if let s = DevinSkill.shared.statusText(for: call) { return s }
         if let s = CursorSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleDriveSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleGmailSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
         if let s = DynamicSkillRegistry.shared.statusText(for: call) { return s }
         return "running \(call.name.replacingOccurrences(of: "_", with: " "))"
     }

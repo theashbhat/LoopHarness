@@ -44,6 +44,10 @@ final class KeyStore {
         case xAccessToken           = "X_ACCESS_TOKEN"
         case xAccessTokenSecret     = "X_ACCESS_TOKEN_SECRET"
         case sfBayTransit           = "SF_BAY_511_API_KEY"
+        case googleWorkspaceAccessToken  = "GOOGLE_WORKSPACE_ACCESS_TOKEN"
+        case googleWorkspaceRefreshToken = "GOOGLE_WORKSPACE_REFRESH_TOKEN"
+        case googleWorkspaceClientId     = "GOOGLE_WORKSPACE_CLIENT_ID"
+        case googleWorkspaceClientSecret = "GOOGLE_WORKSPACE_CLIENT_SECRET"
 
         /// User-facing label shown in Settings.
         var displayName: String {
@@ -69,6 +73,10 @@ final class KeyStore {
             case .xAccessToken:           return "X Access Token"
             case .xAccessTokenSecret:     return "X Access Token Secret"
             case .sfBayTransit:           return "511 SF Bay API Key"
+            case .googleWorkspaceAccessToken:  return "Google Workspace Access Token"
+            case .googleWorkspaceRefreshToken: return "Google Workspace Refresh Token"
+            case .googleWorkspaceClientId:     return "Google Workspace Client ID"
+            case .googleWorkspaceClientSecret: return "Google Workspace Client Secret"
             }
         }
 
@@ -96,6 +104,10 @@ final class KeyStore {
             case .xAccessToken:           return "User-level access token with read+write permission from developer.x.com"
             case .xAccessTokenSecret:     return "User-level access token secret — shown once at generation time"
             case .sfBayTransit:           return "Free API token from 511.org/open-data/token — powers real-time Muni arrival predictions"
+            case .googleWorkspaceAccessToken:  return "OAuth2 access token from Google Cloud Console · powers Drive, Gmail, Calendar"
+            case .googleWorkspaceRefreshToken: return "Optional. OAuth2 refresh token — lets the app request a new access token when the current one expires"
+            case .googleWorkspaceClientId:     return "Optional. OAuth2 client id from Google Cloud Console — needed for token refresh"
+            case .googleWorkspaceClientSecret: return "Optional. OAuth2 client secret from Google Cloud Console — needed for token refresh"
             }
         }
     }
@@ -111,6 +123,7 @@ final class KeyStore {
         case github, slack, notion, obsidian
         case twitter
         case sfBayTransit
+        case googleWorkspace
 
         /// Row title in the list + window title in the editor.
         var displayName: String {
@@ -129,6 +142,7 @@ final class KeyStore {
             case .obsidian:   return "Obsidian"
             case .twitter:    return "X (Twitter)"
             case .sfBayTransit: return "511 SF Bay"
+            case .googleWorkspace: return "Google Workspace"
             }
         }
 
@@ -152,6 +166,7 @@ final class KeyStore {
             case .obsidian:   return "Read and write your Obsidian vault through a self-hosted relay"
             case .twitter:    return "Post tweets to X (Twitter) with OAuth 1.0a"
             case .sfBayTransit: return "Real-time SF Muni bus/train arrival predictions via the 511 API"
+            case .googleWorkspace: return "Google Drive, Gmail, and Calendar via OAuth2 access token"
             }
         }
 
@@ -176,6 +191,7 @@ final class KeyStore {
             case .obsidian:   return [.obsidianAPI, .obsidianBaseURL, .obsidianVaultName]
             case .twitter:    return [.xAPIKey, .xAPISecret, .xAccessToken, .xAccessTokenSecret]
             case .sfBayTransit: return [.sfBayTransit]
+            case .googleWorkspace: return [.googleWorkspaceAccessToken, .googleWorkspaceRefreshToken, .googleWorkspaceClientId, .googleWorkspaceClientSecret]
             }
         }
 
