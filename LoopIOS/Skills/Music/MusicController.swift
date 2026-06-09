@@ -205,11 +205,17 @@ final class MusicController {
         switch targetType.lowercased() {
         case "song":
             let id = MusicItemID(targetId)
-            var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: id)
-            req.limit = 1
-            guard let song = try await req.response().items.first else {
-                return notFoundResult
+            let song: Song?
+            if targetId.hasPrefix("i.") {
+                var req = MusicLibraryRequest<Song>()
+                req.filter(matching: \.id, equalTo: id)
+                song = try await req.response().items.first
+            } else {
+                var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: id)
+                req.limit = 1
+                song = try await req.response().items.first
             }
+            guard let song else { return notFoundResult }
             if queueMode == "append" {
                 try await player.queue.insert(song, position: .tail)
             } else {
@@ -222,12 +228,22 @@ final class MusicController {
 
         case "album":
             let id = MusicItemID(targetId)
-            var req = MusicCatalogResourceRequest<Album>(matching: \.id, equalTo: id)
-            req.limit = 1
-            guard let album = try await req.response().items.first else {
-                return notFoundResult
+            let album: Album?
+            if targetId.hasPrefix("l.") {
+                var req = MusicLibraryRequest<Album>()
+                req.filter(matching: \.id, equalTo: id)
+                album = try await req.response().items.first
+            } else {
+                var req = MusicCatalogResourceRequest<Album>(matching: \.id, equalTo: id)
+                req.limit = 1
+                album = try await req.response().items.first
             }
-            player.queue = .init(for: [album])
+            guard let album else { return notFoundResult }
+            if queueMode == "append" {
+                try await player.queue.insert(album, position: .tail)
+            } else {
+                player.queue = .init(for: [album])
+            }
             captureNowPlaying(title: album.title,
                               artist: album.artistName,
                               album: album.title,
@@ -235,12 +251,22 @@ final class MusicController {
 
         case "playlist":
             let id = MusicItemID(targetId)
-            var req = MusicCatalogResourceRequest<Playlist>(matching: \.id, equalTo: id)
-            req.limit = 1
-            guard let playlist = try await req.response().items.first else {
-                return notFoundResult
+            let playlist: Playlist?
+            if targetId.hasPrefix("p.") {
+                var req = MusicLibraryRequest<Playlist>()
+                req.filter(matching: \.id, equalTo: id)
+                playlist = try await req.response().items.first
+            } else {
+                var req = MusicCatalogResourceRequest<Playlist>(matching: \.id, equalTo: id)
+                req.limit = 1
+                playlist = try await req.response().items.first
             }
-            player.queue = .init(for: [playlist])
+            guard let playlist else { return notFoundResult }
+            if queueMode == "append" {
+                try await player.queue.insert(playlist, position: .tail)
+            } else {
+                player.queue = .init(for: [playlist])
+            }
             captureNowPlaying(title: playlist.name,
                               artist: playlist.curatorName,
                               album: nil,

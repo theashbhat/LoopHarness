@@ -84,6 +84,15 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
     private(set) var pdfAttachments: [String: PDFAttachment] = [:]
     private static let pdfMessageIdPrefix = "pdf-"
 
+    /// Story plumbing, parallel to image/PDF. Placeholder message persisted
+    /// under id `story-<attachmentId>`; the live attachment (with its rendered
+    /// HTML file URL) lives in `storyAttachments` so a tab switch / reload can
+    /// re-render the card. `storyPlayer` retains the open full-screen player.
+    private var storyBubbles: [String: StoryBubbleView] = [:]
+    private(set) var storyAttachments: [String: StoryAttachment] = [:]
+    private static let storyMessageIdPrefix = "story-"
+    private var storyPlayer: StoryPlayerWindowController?
+
     /// The markdown editor currently slid up over the chat pane, if any, plus
     /// the top constraint we animate to drive the vertical slide.
     private var markdownEditorVC: MarkdownEditorViewController?
@@ -198,6 +207,20 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             name: .voiceLoopStateDidChange,
             object: nil
         )
+        // Drop our retained story player when its window closes so it (and the
+        // WKWebView) deallocate.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(storyPlayerDidClose(_:)),
+            name: .storyPlayerDidClose,
+            object: nil
+        )
+    }
+
+    @objc private func storyPlayerDidClose(_ note: Notification) {
+        if let closed = note.object as? StoryPlayerWindowController, closed === storyPlayer {
+            storyPlayer = nil
+        }
     }
 
     deinit {
@@ -871,6 +894,7 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         // map survives so we can re-render their state below.
         imageBubbles.removeAll()
         pdfBubbles.removeAll()
+        storyBubbles.removeAll()
         lastRebuiltMessages = messages
         let manager = SimpleConversationManager.shared
         for (messageIndex, message) in messages.enumerated() {
@@ -939,6 +963,25 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                                                onRetry:   { [weak self] att in self?.retryPDF(attachment: att) })
                     pdfBubbles[attachmentId] = bubble
                     stack.addArrangedSubview(makePDFRow(bubbleView: bubble))
+                } else if message.role == "assistant",
+                   message.id.hasPrefix(Self.storyMessageIdPrefix) {
+                    // story-prefixed assistant rows mirror the image/PDF
+                    // branches: the live attachment (with the rendered HTML
+                    // file URL) lives in `storyAttachments`. On a cold relaunch
+                    // before the render finished we surface the same recovery.
+                    let attachmentId = String(message.id.dropFirst(Self.storyMessageIdPrefix.count))
+                    let attachment = storyAttachments[attachmentId]
+                        ?? StoryAttachment(id: attachmentId,
+                                           title: message.content.isEmpty ? "Story" : message.content,
+                                           template: .dailyRecap,
+                                           jsonPayload: "{}",
+                                           status: .failed,
+                                           failureReason: "Story is no longer available — ask Loop to regenerate it.")
+                    let bubble = StoryBubbleView(attachment: attachment,
+                                                 onOpen:  { [weak self] att in self?.openStory(attachment: att) },
+                                                 onRetry: { [weak self] att in self?.retryStory(attachment: att) })
+                    storyBubbles[attachmentId] = bubble
+                    stack.addArrangedSubview(makeStoryRow(bubbleView: bubble))
                 } else {
                     // Going through messageStruct gives us the decoded
                     // FileAttachment (if any) without re-parsing JSON here.
@@ -1026,6 +1069,31 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             title: attachment.title,
             document: attachment.document,
             template: attachment.template,
+            conversationId: attachment.conversationId
+        )
+    }
+
+    /// Open the rendered story in the full-screen player window. We retain a
+    /// single player at a time; opening another replaces it.
+    private func openStory(attachment: StoryAttachment) {
+        guard attachment.status == .ready,
+              let url = attachment.fileURL,
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        storyPlayer?.close()
+        let player = StoryPlayerWindowController(attachment: attachment)
+        storyPlayer = player
+        player.present()
+    }
+
+    /// Re-run a failed render under the same attachment id so the existing
+    /// bubble refreshes in place (StoryGenerationService has no separate
+    /// retry entry point — re-submitting with the same id is the retry).
+    private func retryStory(attachment: StoryAttachment) {
+        StoryGenerationService.shared.submit(
+            title: attachment.title,
+            template: attachment.template,
+            jsonPayload: attachment.jsonPayload,
+            attachmentId: attachment.id,
             conversationId: attachment.conversationId
         )
     }
@@ -1935,6 +2003,21 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         row.addArrangedSubview(spacer)
         bubbleView.widthAnchor.constraint(lessThanOrEqualToConstant: 420).isActive = true
+        return row
+    }
+
+    /// Left-aligned row for a generated story card, on the assistant side.
+    private func makeStoryRow(bubbleView: StoryBubbleView) -> NSView {
+        bubbleView.translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.addArrangedSubview(bubbleView)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        bubbleView.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
         return row
     }
 
@@ -2937,6 +3020,65 @@ extension ConversationWindowController: PDFSkillHost {
     }
 
     private func resolvePDFAttachmentConversation(_ attachment: PDFAttachment) -> SimpleConversation? {
+        if let id = attachment.conversationId,
+           let conv = SimpleConversationManager.shared.getConversation(by: id) {
+            return conv
+        }
+        return SimpleConversationManager.shared.currentConversation
+    }
+}
+
+// MARK: - StorySkillHost
+
+extension ConversationWindowController: StorySkillHost {
+
+    /// Insert (or, on retry, refresh) a story card for a render that just
+    /// kicked off. Mirrors the image / PDF hosts: a placeholder message goes
+    /// into the persistent store under id `story-<id>` so a tab switch or
+    /// window reload re-renders the card.
+    func storySkillDidStartGenerating(_ attachment: StoryAttachment) {
+        storyAttachments[attachment.id] = attachment
+
+        if let existing = storyBubbles[attachment.id] {
+            existing.update(attachment: attachment)
+            if isStoryAttachmentForActiveTab(attachment) { surfaceForResponse() }
+            return
+        }
+
+        if let conversation = resolveStoryAttachmentConversation(attachment) {
+            let marker = MessageStruct(
+                id: "\(Self.storyMessageIdPrefix)\(attachment.id)",
+                role: "assistant",
+                content: attachment.title,
+                model: "loop-story"
+            )
+            SimpleConversationManager.shared.addMessage(marker, to: conversation)
+        }
+
+        guard isStoryAttachmentForActiveTab(attachment) else { return }
+
+        let bubble = StoryBubbleView(attachment: attachment,
+                                     onOpen:  { [weak self] att in self?.openStory(attachment: att) },
+                                     onRetry: { [weak self] att in self?.retryStory(attachment: att) })
+        storyBubbles[attachment.id] = bubble
+        stack.addArrangedSubview(makeStoryRow(bubbleView: bubble))
+        scrollToBottom()
+        surfaceForResponse()
+    }
+
+    func storySkillDidFinishGenerating(_ attachment: StoryAttachment) {
+        storyAttachments[attachment.id] = attachment
+        if let bubble = storyBubbles[attachment.id] {
+            bubble.update(attachment: attachment)
+        }
+    }
+
+    private func isStoryAttachmentForActiveTab(_ attachment: StoryAttachment) -> Bool {
+        guard let stamped = attachment.conversationId else { return true }
+        return stamped == activeTab?.conversation.id
+    }
+
+    private func resolveStoryAttachmentConversation(_ attachment: StoryAttachment) -> SimpleConversation? {
         if let id = attachment.conversationId,
            let conv = SimpleConversationManager.shared.getConversation(by: id) {
             return conv

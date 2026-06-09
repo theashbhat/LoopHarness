@@ -839,6 +839,18 @@ The current date and time is \(now).
         if LocationSkill.shared.handles(functionName: function.name) {
             LocationSkill.shared.handle(functionCall: function, completion: cont); return
         }
+        if MapsSkill.shared.handles(functionName: function.name) {
+            MapsSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if GeocodingSkill.shared.handles(functionName: function.name) {
+            GeocodingSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if NavigationSkill.shared.handles(functionName: function.name) {
+            NavigationSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if MuniRealtimeSkill.shared.handles(functionName: function.name) {
+            MuniRealtimeSkill.shared.handle(functionCall: function, completion: cont); return
+        }
         if MacAppSkill.shared.handles(functionName: function.name) {
             MacAppSkill.shared.handle(functionCall: function, completion: cont); return
         }
@@ -878,6 +890,14 @@ The current date and time is \(now).
             PDFSkill.shared.handle(functionCall: function, completion: cont)
             return
         }
+        if StorySkill.shared.handles(functionName: function.name) {
+            // Submit-and-return like Image/PDF: StorySkill hands the render to
+            // StoryGenerationService and returns a queued stub immediately; the
+            // card fills in via StorySkillHost on the conversation window when
+            // the WKWebView finishes rendering.
+            StorySkill.shared.handle(functionCall: function, completion: cont)
+            return
+        }
         if SubAgentSkill.shared.handles(functionName: function.name) {
             SubAgentSkill.shared.handle(functionCall: function, completion: cont)
             return
@@ -887,6 +907,27 @@ The current date and time is \(now).
         }
         if CursorSkill.shared.handles(functionName: function.name) {
             CursorSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if TwitterSkill.shared.handles(functionName: function.name) {
+            TwitterSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if SSHSkill.shared.handles(functionName: function.name) {
+            SSHSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if GoogleDriveSkill.shared.handles(functionName: function.name) {
+            GoogleDriveSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if GoogleGmailSkill.shared.handles(functionName: function.name) {
+            GoogleGmailSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        if GoogleCalendarSkill.shared.handles(functionName: function.name) {
+            GoogleCalendarSkill.shared.handle(functionCall: function, completion: cont); return
+        }
+        // Remote MCP servers the user has installed — routed before the
+        // dynamic JS registry since both land in the same trailing section
+        // of the advertised tool schemas.
+        if MCPRegistry.shared.handles(functionName: function.name) {
+            MCPRegistry.shared.handle(functionCall: function, completion: cont); return
         }
         // Dynamic (user-authored JS) skills last — hot-loaded so the
         // registry is the source of truth for what's currently available.
@@ -914,9 +955,20 @@ The current date and time is \(now).
         if let s = SkillBuilderSkill.shared.statusText(for: call) { return s }
         if let s = GitHubSkill.shared.statusText(for: call) { return s }
         if let s = PDFSkill.shared.statusText(for: call) { return s }
+        if let s = StorySkill.shared.statusText(for: call) { return s }
         if let s = SubAgentSkill.shared.statusText(for: call) { return s }
         if let s = DevinSkill.shared.statusText(for: call) { return s }
         if let s = CursorSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleDriveSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleGmailSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
+        if let s = MapsSkill.shared.statusText(for: call) { return s }
+        if let s = GeocodingSkill.shared.statusText(for: call) { return s }
+        if let s = NavigationSkill.shared.statusText(for: call) { return s }
+        if let s = MuniRealtimeSkill.shared.statusText(for: call) { return s }
+        if let s = TwitterSkill.shared.statusText(for: call) { return s }
+        if let s = SSHSkill.shared.statusText(for: call) { return s }
+        if let s = MCPRegistry.shared.statusText(for: call) { return s }
         if let s = DynamicSkillRegistry.shared.statusText(for: call) { return s }
         return "running \(call.name.replacingOccurrences(of: "_", with: " "))"
     }

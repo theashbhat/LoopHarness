@@ -13,8 +13,16 @@
 
 import AppKit
 import UserNotifications
+import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Sparkle updater. `startingUpdater: true` plus `SUEnableAutomaticChecks`
+    /// in Info.plist means it checks the appcast on launch + on the scheduled
+    /// interval, downloads the EdDSA-signed update in the background, and
+    /// prompts to install. Also backs the "Check for Updates…" menu item.
+    /// Held strongly for the app lifetime so the background scheduler keeps
+    /// running.
+    private var updaterController: SPUStandardUpdaterController?
     private var recorderController: RecorderWindowController?
     /// Internal so other module-level controllers (e.g. the Scheduled Tasks
     /// window's "Open Last" path) can route through the tab manager rather
@@ -130,6 +138,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // implements PDFSkillHost and renders the PDF cell when the render
         // completes.
         PDFGenerationService.shared.host = conversation
+        // And StoryGenerationService — the conversation window implements
+        // StorySkillHost and renders the story card (then the full-screen
+        // player on tap) when the HTML render completes.
+        StoryGenerationService.shared.host = conversation
 
         let monitor = HotKeyMonitor()
         // All hotkey closures route through `recorder.coordinator`, which the
@@ -162,6 +174,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         monitor.start()
         self.hotKeyMonitor = monitor
+
+        // Start Sparkle before the menu is built so the "Check for Updates…"
+        // item can target it. Kicks off the first background update check on
+        // launch (subject to SUScheduledCheckInterval) per Info.plist config.
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
 
         // Build the app menu so cmd-Q etc. work — required for any regular
         // (.regular activation policy) AppKit app.
@@ -384,6 +405,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Loop", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
+        // Manual update trigger. Targets the Sparkle controller, which also
+        // validates the item (greys it out while a check is already running).
+        let checkForUpdatesItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdatesItem.target = updaterController
+        appMenu.addItem(checkForUpdatesItem)
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Hide Loop", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.command, .option]
@@ -549,6 +580,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let item = NSMenuItem(
                     title: voice.label,
                     action: #selector(AppDelegate.selectElevenLabsVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.representedObject = voice.id
+                item.state = (voice.id == activeVoice) ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        // OpenAI voice picker only when gpt-4o-mini-tts is the active provider.
+        if active == .openAIMiniTTS {
+            menu.addItem(NSMenuItem.separator())
+            let header = NSMenuItem(title: "OpenAI Voice", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            let activeVoice = TTSSettings.shared.openAIVoice
+            for voice in TTSSettings.openAIVoices {
+                let item = NSMenuItem(
+                    title: voice.label,
+                    action: #selector(AppDelegate.selectOpenAIVoice(_:)),
                     keyEquivalent: ""
                 )
                 item.representedObject = voice.id
@@ -725,6 +775,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let provider = TTSSettings.shared.provider
         guard provider == .elevenLabsV3 || provider == .elevenLabsFlashV25 else { return }
         TTSSettings.shared.setElevenLabsVoice(voiceId, for: provider)
+    }
+
+    @objc fileprivate func selectOpenAIVoice(_ sender: NSMenuItem) {
+        guard let voiceId = sender.representedObject as? String else { return }
+        TTSSettings.shared.openAIVoice = voiceId
     }
 
     @objc fileprivate func openKeysSettings(_ sender: Any?) {

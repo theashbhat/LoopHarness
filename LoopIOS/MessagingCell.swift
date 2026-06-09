@@ -36,6 +36,14 @@ protocol MessagingCellPDFDelegate: AnyObject {
     func messagingCellDidTapPDFRetry(attachmentId: String)
 }
 
+/// Tap-callbacks from the inline story card. Set on every cell that renders
+/// a story attachment so MessagingVC can present the full-screen story player
+/// or re-run a failed render.
+protocol MessagingCellStoryDelegate: AnyObject {
+    func messagingCellDidTapStory(attachmentId: String)
+    func messagingCellDidTapStoryRetry(attachmentId: String)
+}
+
 /// Tap-callback from the inline "Used N tools" disclosure row. Set on cells
 /// that render an assistant turn carrying tool calls so MessagingVC can toggle
 /// the row's expanded/collapsed state.
@@ -229,6 +237,79 @@ class MessagingCell: UITableViewCell {
     private var currentPDFAttachmentId: String?
     weak var pdfDelegate: MessagingCellPDFDelegate?
 
+    // MARK: - Inline story card views (StorySkill)
+    /// Portrait "poster" card for a generated HTML story. The full story
+    /// renders in the full-screen player on tap; the card is a glanceable
+    /// stand-in (gradient + title + play glyph) with a spinner while
+    /// generating and a retry affordance on failure.
+    private lazy var storyCardView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.layer.cornerRadius = 16
+        v.clipsToBounds = true
+        v.backgroundColor = UIColor.secondarySystemBackground
+        v.isHidden = true
+        v.isUserInteractionEnabled = true
+        return v
+    }()
+    private lazy var storyGradientLayer: CAGradientLayer = {
+        let g = CAGradientLayer()
+        g.colors = [
+            UIColor.systemIndigo.cgColor,
+            UIColor.systemPurple.cgColor,
+            UIColor.systemPink.cgColor,
+        ]
+        g.startPoint = CGPoint(x: 0, y: 0)
+        g.endPoint = CGPoint(x: 1, y: 1)
+        return g
+    }()
+    private lazy var storyPlayGlyph: UIImageView = {
+        let v = UIImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 34, weight: .semibold)
+        v.image = UIImage(systemName: "play.circle.fill", withConfiguration: cfg)
+        v.tintColor = UIColor.white.withAlphaComponent(0.95)
+        v.contentMode = .scaleAspectFit
+        return v
+    }()
+    private lazy var storyTitleLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 17, weight: .bold)
+        l.textColor = .white
+        l.numberOfLines = 3
+        return l
+    }()
+    private lazy var storySubtitleLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.preferredFont(forTextStyle: .caption1)
+        l.textColor = UIColor.white.withAlphaComponent(0.85)
+        l.numberOfLines = 2
+        return l
+    }()
+    private lazy var storySpinner: UIActivityIndicatorView = {
+        let s = UIActivityIndicatorView(style: .medium)
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.color = .white
+        s.hidesWhenStopped = true
+        return s
+    }()
+    private lazy var storyRetryButton: UIButton = {
+        let b = makePDFActionButton(title: "Try again",
+                                    systemImage: "arrow.clockwise",
+                                    action: #selector(handleStoryRetryTap))
+        return b
+    }()
+    private lazy var storyTapRecognizer: UITapGestureRecognizer = {
+        let r = UITapGestureRecognizer(target: self, action: #selector(handleStoryTap))
+        r.numberOfTapsRequired = 1
+        return r
+    }()
+    private var storyCardConstraints: [NSLayoutConstraint] = []
+    private var currentStoryAttachmentId: String?
+    weak var storyDelegate: MessagingCellStoryDelegate?
+
     // MARK: - Inline map attachment views (MapsSkill)
     /// Caption label shown above the map (optional — hidden when nil).
     private lazy var mapTitleLabel: UILabel = {
@@ -421,6 +502,20 @@ class MessagingCell: UITableViewCell {
         NSLayoutConstraint.deactivate(pdfCardConstraints)
         pdfCardConstraints.removeAll()
 
+        // Story card cleanup. Hide + clear + restore the label colors the
+        // failure path overrides, so a recycled cell doesn't flash stale text.
+        storyCardView.isHidden = true
+        storyTitleLabel.text = nil
+        storyTitleLabel.textColor = .white
+        storySubtitleLabel.text = nil
+        storySubtitleLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        storySpinner.stopAnimating()
+        storySpinner.isHidden = true
+        storyRetryButton.isHidden = true
+        currentStoryAttachmentId = nil
+        NSLayoutConstraint.deactivate(storyCardConstraints)
+        storyCardConstraints.removeAll()
+
         // Map cleanup — drop annotations so a recycled cell doesn't briefly
         // show the previous message's pins.
         mapView.removeAnnotations(mapView.annotations)
@@ -579,6 +674,13 @@ class MessagingCell: UITableViewCell {
         // page-1 thumbnail + title + page count + Preview/Share buttons.
         if let pdfAttachment = data.pdfAttachment {
             applyPDFAttachment(pdfAttachment, modelLabelText: modelText(for: data))
+            return
+        }
+
+        // Inline story card (generate_story). Renders as a portrait poster
+        // with title + play glyph; tap opens the full-screen story player.
+        if let storyAttachment = data.storyAttachment {
+            applyStoryAttachment(storyAttachment, modelLabelText: modelText(for: data))
             return
         }
 
@@ -1843,6 +1945,134 @@ class MessagingCell: UITableViewCell {
     @objc private func handlePDFRetryTap() {
         guard let id = currentPDFAttachmentId else { return }
         pdfDelegate?.messagingCellDidTapPDFRetry(attachmentId: id)
+    }
+
+    // MARK: - Story card
+
+    private func applyStoryAttachment(_ attachment: StoryAttachment,
+                                      modelLabelText: String) {
+        currentStoryAttachmentId = attachment.id
+
+        // Hide every other render path's views; the story card takes the row.
+        profileImageView.isHidden = true
+        textView.isHidden = true
+        animatingtextView.isHidden = true
+        actionButton.isHidden = true
+        shimmerLabel.isHidden = true
+        modelLabel.isHidden = false
+        attachmentImageView.isHidden = true
+        attachmentSpinner.stopAnimating()
+        attachmentSpinner.isHidden = true
+        attachmentErrorLabel.isHidden = true
+        downloadButton.isHidden = true
+        retryButton.isHidden = true
+
+        if storyCardView.superview == nil {
+            self.contentView.addSubview(storyCardView)
+            storyCardView.layer.insertSublayer(storyGradientLayer, at: 0)
+            storyCardView.addSubview(storyPlayGlyph)
+            storyCardView.addSubview(storyTitleLabel)
+            storyCardView.addSubview(storySubtitleLabel)
+            storyCardView.addSubview(storySpinner)
+            storyCardView.addSubview(storyRetryButton)
+        }
+        if storyTapRecognizer.view !== storyCardView {
+            storyCardView.addGestureRecognizer(storyTapRecognizer)
+        }
+
+        storyCardView.isHidden = false
+
+        // Portrait poster — 9:16-ish, sized small so it reads as a card.
+        let cardWidth: CGFloat = 160
+        let cardHeight: CGFloat = 248
+
+        storyCardConstraints = [
+            storyCardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            storyCardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            storyCardView.widthAnchor.constraint(equalToConstant: cardWidth),
+            storyCardView.heightAnchor.constraint(equalToConstant: cardHeight),
+
+            storyPlayGlyph.topAnchor.constraint(equalTo: storyCardView.topAnchor, constant: 16),
+            storyPlayGlyph.leadingAnchor.constraint(equalTo: storyCardView.leadingAnchor, constant: 16),
+
+            storySpinner.centerXAnchor.constraint(equalTo: storyCardView.centerXAnchor),
+            storySpinner.centerYAnchor.constraint(equalTo: storyCardView.centerYAnchor),
+
+            storyTitleLabel.leadingAnchor.constraint(equalTo: storyCardView.leadingAnchor, constant: 16),
+            storyTitleLabel.trailingAnchor.constraint(equalTo: storyCardView.trailingAnchor, constant: -16),
+
+            storySubtitleLabel.leadingAnchor.constraint(equalTo: storyTitleLabel.leadingAnchor),
+            storySubtitleLabel.trailingAnchor.constraint(equalTo: storyTitleLabel.trailingAnchor),
+            storySubtitleLabel.topAnchor.constraint(equalTo: storyTitleLabel.bottomAnchor, constant: 4),
+            storySubtitleLabel.bottomAnchor.constraint(equalTo: storyCardView.bottomAnchor, constant: -16),
+
+            storyRetryButton.leadingAnchor.constraint(equalTo: storyTitleLabel.leadingAnchor),
+            storyRetryButton.topAnchor.constraint(equalTo: storySubtitleLabel.bottomAnchor, constant: 8),
+
+            modelLabel.leadingAnchor.constraint(equalTo: storyCardView.leadingAnchor),
+            modelLabel.topAnchor.constraint(equalTo: storyCardView.bottomAnchor, constant: 6),
+            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: modelLabel.bottomAnchor, constant: 12),
+        ]
+        NSLayoutConstraint.activate(storyCardConstraints)
+
+        storyTitleLabel.text = attachment.title
+
+        switch attachment.status {
+        case .generating:
+            storyGradientLayer.isHidden = false
+            storyPlayGlyph.isHidden = true
+            storySpinner.isHidden = false
+            storySpinner.startAnimating()
+            storySubtitleLabel.text = "Creating story…"
+            storyRetryButton.isHidden = true
+            storyTapRecognizer.isEnabled = false
+        case .ready:
+            storyGradientLayer.isHidden = false
+            storySpinner.stopAnimating()
+            storySpinner.isHidden = true
+            storyPlayGlyph.isHidden = false
+            storySubtitleLabel.text = "Tap to view"
+            storyRetryButton.isHidden = true
+            storyTapRecognizer.isEnabled = true
+        case .failed:
+            storyGradientLayer.isHidden = true
+            storySpinner.stopAnimating()
+            storySpinner.isHidden = true
+            storyPlayGlyph.isHidden = true
+            storyTitleLabel.textColor = .label
+            storySubtitleLabel.textColor = .secondaryLabel
+            storySubtitleLabel.text = attachment.failureReason ?? "Couldn't generate story"
+            storyRetryButton.isHidden = false
+            storyTapRecognizer.isEnabled = false
+        }
+
+        baseModelText = modelLabelText
+        modelLabel.text = modelLabelText
+        modelLabel.textColor = .secondaryLabel
+        modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+        modelLabel.numberOfLines = 1
+        ttsIndicator.stopAnimating()
+        ttsIndicator.isHidden = true
+        setNeedsLayout()
+    }
+
+    @objc private func handleStoryTap() {
+        guard let id = currentStoryAttachmentId else { return }
+        storyDelegate?.messagingCellDidTapStory(attachmentId: id)
+    }
+
+    @objc private func handleStoryRetryTap() {
+        guard let id = currentStoryAttachmentId else { return }
+        storyDelegate?.messagingCellDidTapStoryRetry(attachmentId: id)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // CALayer frames aren't driven by Auto Layout — keep the story card's
+        // gradient sized to the card whenever the card is on screen.
+        if !storyCardView.isHidden {
+            storyGradientLayer.frame = storyCardView.bounds
+        }
     }
 
     private func configureRoundButton(_ button: UIButton,

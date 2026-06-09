@@ -203,7 +203,7 @@ final class AnthropicChat {
         // can trip the orphan-tool_use sanitizer below.
         let filteredMessages = messages.filter { m in
             guard m.role == "assistant" else { return true }
-            if m.id.hasPrefix("image-") || m.id.hasPrefix("pdf-") { return false }
+            if m.id.hasPrefix("image-") || m.id.hasPrefix("pdf-") || m.id.hasPrefix("story-") { return false }
             return true
         }
 

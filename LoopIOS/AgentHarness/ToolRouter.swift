@@ -124,6 +124,12 @@ struct ToolRouter {
         ], toolNames: [
             "generate_pdf",
         ]),
+        SkillGroup(name: "story", keywords: [
+            "story", "stories", "recap", "infographic", "summary card",
+            "visual summary", "wrapped", "highlight reel",
+        ], toolNames: [
+            "generate_story",
+        ]),
         SkillGroup(name: "twitter", keywords: [
             "tweet", "twitter", "x.com", "post tweet",
         ], toolNames: [

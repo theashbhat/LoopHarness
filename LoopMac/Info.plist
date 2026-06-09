@@ -31,6 +31,18 @@
 	<string>Loop uses Apple Music to find tracks and play music that matches the mood of the conversation.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Loop drives Terminal, Ghostty, and other terminal apps via AppleScript so it can open windows and run shell commands on your behalf — e.g. starting a Claude Code session in one of your repos.</string>
+	<!-- Sparkle auto-update. SUFeedURL points at the appcast.xml uploaded to the
+	     fixed `appcast` GitHub Release tag by .github/workflows/release-mac.yml;
+	     SUPublicEDKey is the EdDSA public key whose private half signs each update
+	     (private key lives in the keychain / the SPARKLE_ED_PRIVATE_KEY CI secret). -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/getathelas/LoopHarness/releases/download/appcast/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>DbNybdk5OuCooBgHeC6+JykhxQ4yYjHBAv+igHWXBBw=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<key>DEEPGRAM_API_KEY</key>
 	<string>$(DEEPGRAM_API_KEY)</string>
 	<key>ELEVEN_LABS_KEY</key>

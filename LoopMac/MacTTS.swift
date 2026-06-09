@@ -19,6 +19,7 @@ enum MacTTSProvider: String, CaseIterable {
     case aura2              = "aura2"              // Deepgram Aura-2 (streaming, lowest latency)
     case elevenLabsV3       = "elevenLabsV3"       // ElevenLabs Eleven v3 (most expressive)
     case elevenLabsFlashV25 = "elevenLabsFlashV25" // ElevenLabs Flash v2.5 (low-latency)
+    case openAIMiniTTS      = "openAIMiniTTS"      // OpenAI gpt-4o-mini-tts (steerable via instructions)
     case system             = "system"             // AVSpeechSynthesizer (offline)
 
     var displayName: String {
@@ -26,6 +27,7 @@ enum MacTTSProvider: String, CaseIterable {
         case .aura2:              return "Deepgram Aura-2"
         case .elevenLabsV3:       return "ElevenLabs v3"
         case .elevenLabsFlashV25: return "ElevenLabs Flash v2.5"
+        case .openAIMiniTTS:      return "OpenAI gpt-4o-mini-tts"
         case .system:             return "On-device (offline)"
         }
     }
@@ -51,6 +53,7 @@ final class TTSSettings {
     private let auraVoiceKey = "loopmac.ttsAuraVoice"
     private let elevenLabsV3VoiceKey = "loopmac.ttsElevenLabsV3Voice"
     private let elevenLabsFlashVoiceKey = "loopmac.ttsElevenLabsFlashVoice"
+    private let openAIVoiceKey = "loopmac.ttsOpenAIVoice"
 
     /// Defaults to .aura2 to match the iOS preference the user mentioned.
     var provider: MacTTSProvider {
@@ -83,6 +86,7 @@ final class TTSSettings {
 
     /// ElevenLabs voice library. Both v3 and Flash v2.5 share the same set;
     /// callers pick per-provider so v3 / Flash can store different picks.
+    /// Kept in sync with iOS's `TTSProvider.voiceOptions`.
     static let elevenLabsVoices: [(label: String, id: String)] = [
         ("Rachel (warm female)",  "21m00Tcm4TlvDq8ikWAM"),
         ("Bella (young female)",  "EXAVITQu4vr4xnSDxMaL"),
@@ -90,6 +94,11 @@ final class TTSSettings {
         ("Antoni (calm male)",    "ErXwobaYiN019PkySvjV"),
         ("Elli (soft female)",    "MF3mGyEYCl7XYWbV9V6O"),
         ("Josh (steady male)",    "TxGEqnHWrfWFTfGW9XjX"),
+        ("Hayes (english male)",          "sIivXWc5MTlPIP3kJXhg"),
+        ("Rory (irish male)",             "hmMWXCj9K7N5mCPcRkfC"),
+        ("Hannah (american female)",      "ZSNL4hPqCnqoMPaI4jGX"),
+        ("Zoe (african american female)", "M6ic45wruJGWAxLFEMNK"),
+        ("Agent (secret agent male)",     "ICIc5IiEgLitxGwyb7ZG"),
     ]
 
     private static let elevenLabsDefaultVoiceId = "21m00Tcm4TlvDq8ikWAM"
@@ -115,6 +124,23 @@ final class TTSSettings {
             return
         }
         NotificationCenter.default.post(name: .ttsSettingsChanged, object: nil)
+    }
+
+    /// OpenAI gpt-4o-mini-tts voice library. Kept in sync with iOS's
+    /// `TTSProvider.voiceOptions` for the `.openAIMiniTTS` case.
+    static let openAIVoices: [(label: String, id: String)] = [
+        "alloy", "echo", "fable", "onyx", "nova",
+        "shimmer", "coral", "sage", "ash", "ballad", "verse",
+    ].map { ($0.capitalized, $0) }
+
+    static let openAIDefaultVoice = "shimmer"
+
+    var openAIVoice: String {
+        get { defaults.string(forKey: openAIVoiceKey) ?? Self.openAIDefaultVoice }
+        set {
+            defaults.set(newValue, forKey: openAIVoiceKey)
+            NotificationCenter.default.post(name: .ttsSettingsChanged, object: nil)
+        }
     }
 }
 
@@ -198,6 +224,9 @@ final class MacSpeechPlayer {
             speakViaSystem(cleaned, token: token)
         case .elevenLabsV3, .elevenLabsFlashV25:
             if speakViaElevenLabs(cleaned, provider: provider, token: token) { return }
+            speakViaSystem(cleaned, token: token)
+        case .openAIMiniTTS:
+            if speakViaOpenAI(cleaned, token: token) { return }
             speakViaSystem(cleaned, token: token)
         case .system:
             speakViaSystem(cleaned, token: token)
@@ -302,27 +331,96 @@ final class MacSpeechPlayer {
                     self.speakViaSystem(text, token: token)
                     return
                 }
-                guard let data = data, !data.isEmpty,
-                      let player = try? AVAudioPlayer(data: data) else {
-                    print("ElevenLabs TTS empty/bad audio — falling back to on-device")
+                guard let data = data, !data.isEmpty else {
+                    print("ElevenLabs TTS empty audio — falling back to on-device")
                     self.speakViaSystem(text, token: token)
                     return
                 }
-                player.prepareToPlay()
-                player.play()
-                self.audioPlayer = player
-                self.startMetering(for: player, token: token)
-                let duration = max(player.duration, 0.5)
-                DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-                    guard let self = self, self.currentToken == token else { return }
-                    self.meteringTimer?.invalidate(); self.meteringTimer = nil
-                    self.audioPlayer = nil
-                    self.onOutputAmplitude?(0)
-                    self.onFinished?()
-                }
+                self.playMP3Data(data, fallbackText: text, providerLabel: "ElevenLabs", token: token)
             }
         }.resume()
         return true
+    }
+
+    // MARK: - OpenAI gpt-4o-mini-tts HTTP
+
+    /// Steers OpenAI's gpt-4o-mini-tts toward better list pacing and warmth.
+    /// Mirrors the iOS `openAITTSInstructions`.
+    private static let openAIInstructions = """
+    Speak in a warm, natural, conversational tone. When reading lists, pause \
+    briefly between items so each one is distinct. Vary pace and emphasis \
+    like a person would.
+    """
+
+    /// Returns true if the request was kicked off; false if there's no key
+    /// (caller falls back to on-device). Network/HTTP failures inside the
+    /// task also fall back.
+    private func speakViaOpenAI(_ text: String, token: Int) -> Bool {
+        guard let apiKey = Self.openAIKey else { return false }
+
+        guard let url = URL(string: "https://api.openai.com/v1/audio/speech") else { return false }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "model": "gpt-4o-mini-tts",
+            "input": text,
+            "voice": TTSSettings.shared.openAIVoice,
+            "response_format": "mp3",
+            "instructions": Self.openAIInstructions
+        ]
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        req.httpBody = bodyData
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self, self.currentToken == token else { return }
+                if let error = error {
+                    print("OpenAI TTS error: \(error) — falling back to on-device")
+                    self.speakViaSystem(text, token: token)
+                    return
+                }
+                if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                    let bodyStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
+                    print("OpenAI TTS HTTP \(http.statusCode): \(bodyStr) — falling back to on-device")
+                    self.speakViaSystem(text, token: token)
+                    return
+                }
+                guard let data = data, !data.isEmpty else {
+                    print("OpenAI TTS empty audio — falling back to on-device")
+                    self.speakViaSystem(text, token: token)
+                    return
+                }
+                self.playMP3Data(data, fallbackText: text, providerLabel: "OpenAI", token: token)
+            }
+        }.resume()
+        return true
+    }
+
+    // MARK: - Shared MP3-buffer playback
+
+    /// Plays full-buffer MP3 bytes (ElevenLabs / OpenAI) via AVAudioPlayer and
+    /// drives avatar metering. Falls back to on-device if the bytes won't
+    /// decode. Must be called on the main thread with a current token.
+    private func playMP3Data(_ data: Data, fallbackText: String, providerLabel: String, token: Int) {
+        guard let player = try? AVAudioPlayer(data: data) else {
+            print("\(providerLabel) TTS bad audio — falling back to on-device")
+            self.speakViaSystem(fallbackText, token: token)
+            return
+        }
+        player.prepareToPlay()
+        player.play()
+        self.audioPlayer = player
+        self.startMetering(for: player, token: token)
+        let duration = max(player.duration, 0.5)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self = self, self.currentToken == token else { return }
+            self.meteringTimer?.invalidate(); self.meteringTimer = nil
+            self.audioPlayer = nil
+            self.onOutputAmplitude?(0)
+            self.onFinished?()
+        }
     }
 
     // MARK: - On-device fallback
@@ -352,5 +450,9 @@ final class MacSpeechPlayer {
 
     fileprivate static var elevenLabsKey: String? {
         KeyStore.shared.value(for: .elevenLabs)
+    }
+
+    fileprivate static var openAIKey: String? {
+        KeyStore.shared.value(for: .openAI)
     }
 }

@@ -472,6 +472,9 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // Same plumbing for PDFGenerationService — placeholder card on
         // submit, swap to ready/failed when the WKWebView render finishes.
         PDFGenerationService.shared.host = self
+        // And for StoryGenerationService — placeholder story card on submit,
+        // swap to ready/failed when the HTML story render finishes.
+        StoryGenerationService.shared.host = self
         // CalendarSkill needs a UI host so it can present
         // EKEventEditViewController for the user to review proposed events
         // before they're saved.
@@ -1606,8 +1609,14 @@ extension MessagingVC: MessageBoxDelegate {
         if let s = TwitterSkill.shared.statusText(for: call) { return s }
         if let s = SSHSkill.shared.statusText(for: call) { return s }
         if let s = MuniRealtimeSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleDriveSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleGmailSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
         #if canImport(HealthKit) && os(iOS)
         if let s = HealthSkill.shared.statusText(for: call) { return s }
+        #endif
+        #if os(iOS)
+        if let s = StorySkill.shared.statusText(for: call) { return s }
         #endif
         if let s = DynamicSkillRegistry.shared.statusText(for: call) { return s }
 
@@ -2432,7 +2441,27 @@ extension MessagingVC: MessageBoxDelegate {
         let coord = VoiceLoopCoordinator.shared
         if coord.state == .speaking {
             coord.setState(.idle)
+            // Deactivate the audio session with .notifyOthersOnDeactivation so
+            // the system sends "interruption ended — you may resume" to any
+            // other audio app (Apple Music, Spotify, podcasts) that was paused
+            // when we activated our .playback session. Without this, system
+            // media stays paused indefinitely after Loop's TTS finishes.
+            deactivateAudioSession()
         }
+    }
+
+    /// Deactivate the shared audio session and notify other apps they may
+    /// resume playback. Called after TTS finishes and after recording ends.
+    /// Failures are best-effort — the session might already be inactive
+    /// (e.g. from the recording teardown path) which is harmless.
+    private func deactivateAudioSession() {
+        #if !os(macOS)
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            // best-effort; session may already be inactive
+        }
+        #endif
     }
 
     /// Speak `text` using on-device AVSpeechSynthesizer. No network, no Deepgram.
@@ -2450,7 +2479,7 @@ extension MessagingVC: MessageBoxDelegate {
             return
         }
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("Offline TTS: audio session setup failed (\(error)) — speaking anyway")
@@ -3255,6 +3284,9 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         // matter — moved up here to keep all three together.
         cell.imageDelegate = self
         cell.pdfDelegate = self
+        #if os(iOS)
+        cell.storyDelegate = self
+        #endif
         cell.onboardingDelegate = self
         configureToolDisclosure(for: cell, message: message)
         cell.setData(data: message, shouldAnimate: message.id == self.messageIdToAnimate)
@@ -3575,6 +3607,7 @@ extension MessagingVC: AVAudioPlayerDelegate {
         audioPlayer = nil
         stopTTSMetering()
         VoiceLoopCoordinator.shared.setState(.idle)
+        deactivateAudioSession()
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
@@ -3585,6 +3618,7 @@ extension MessagingVC: AVAudioPlayerDelegate {
         audioPlayer = nil
         stopTTSMetering()
         VoiceLoopCoordinator.shared.setState(.idle)
+        deactivateAudioSession()
     }
 }
 
@@ -3602,6 +3636,7 @@ extension MessagingVC: AVSpeechSynthesizerDelegate {
             }
             self.offlineSpeechMessageId = nil
             VoiceLoopCoordinator.shared.setState(.idle)
+            self.deactivateAudioSession()
         }
     }
 
@@ -3624,7 +3659,7 @@ extension MessagingVC {
         // Match the existing playback session config so we don't fight the mic
         // engine if it was just torn down.
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("DeepgramTTS: audio session setup failed (\(error)) — falling back")
@@ -3665,6 +3700,7 @@ extension MessagingVC {
                         self.speechBuffer = ""
                     }
                     VoiceLoopCoordinator.shared.setState(.idle)
+                    self.deactivateAudioSession()
                     return
                 }
                 self.speakOffline(text: text, messageId: messageId)
@@ -3679,6 +3715,7 @@ extension MessagingVC {
                 }
                 self.deepgramTTS = nil
                 VoiceLoopCoordinator.shared.setState(.idle)
+                self.deactivateAudioSession()
             }
         }
         // Real per-buffer RMS into the avatar's speaking-mode pulse.
@@ -3734,7 +3771,7 @@ extension MessagingVC {
         guard let apiKey = MessagingVC.elevenLabsAPIKey else { return false }
 
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("ElevenLabsTTS: audio session setup failed (\(error)) — falling back")
@@ -3801,7 +3838,7 @@ extension MessagingVC {
         guard let apiKey = MessagingVC.openAIAPIKey else { return false }
 
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("OpenAITTS: audio session setup failed (\(error)) — falling back")
@@ -3860,7 +3897,7 @@ extension MessagingVC {
     private func playMP3Data(_ data: Data, messageId: String, speed: Double, providerLabel: String) {
         guard self.currentSpeechMessageId == messageId else { return }
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
             let player = try AVAudioPlayer(data: data)
             player.delegate = self
@@ -4198,6 +4235,103 @@ extension MessagingVC: MessagingCellPDFDelegate {
         return url
     }
 }
+
+// MARK: - StorySkillHost
+
+#if os(iOS)
+extension MessagingVC: StorySkillHost {
+
+    func storySkillDidStartGenerating(_ attachment: StoryAttachment) {
+        // Retry path: a placeholder for this id already exists — flip its
+        // state back to .generating in place.
+        if let idx = self.messages.firstIndex(where: { $0.storyAttachment?.id == attachment.id }) {
+            self.messages[idx].storyAttachment = attachment
+            DispatchQueue.main.async {
+                self.reloadStoryRow(attachmentId: attachment.id)
+            }
+            return
+        }
+
+        let placeholder = MessageStruct(
+            id: "story-\(attachment.id)",
+            role: "assistant",
+            content: "",
+            model: "loop-story",
+            storyAttachment: attachment
+        )
+        let conversation = ensureCurrentConversation()
+        conversationManager.addMessage(placeholder, to: conversation)
+        currentConversationEntity = conversationManager.currentConversation
+        self.messages.append(placeholder)
+        DispatchQueue.main.async {
+            self.tableView.reloadData()
+            self.scrollToLastMessage()
+        }
+    }
+
+    func storySkillDidFinishGenerating(_ attachment: StoryAttachment) {
+        // Find the placeholder and mutate its attachment in place so the
+        // card flips spinner → ready without losing scroll position.
+        guard let idx = self.messages.firstIndex(where: { $0.storyAttachment?.id == attachment.id }) else {
+            return
+        }
+        self.messages[idx].storyAttachment = attachment
+        DispatchQueue.main.async {
+            self.reloadStoryRow(attachmentId: attachment.id)
+        }
+    }
+
+    /// Reload the row carrying a story attachment, guarding against the
+    /// table/data-source row-count drift that happens when a render finishes
+    /// mid-stream (the same drift `renderStreamingPartial` defends against).
+    /// On any mismatch — or if the row isn't currently in `visible_messages` —
+    /// fall back to a full reload so we never trip "Invalid batch updates".
+    private func reloadStoryRow(attachmentId: String) {
+        let expectedRows = visible_messages.count + (ai_state != .None ? 1 : 0)
+        guard tableView.numberOfRows(inSection: 0) == expectedRows,
+              let visibleIdx = visible_messages.firstIndex(where: { $0.storyAttachment?.id == attachmentId })
+        else {
+            tableView.reloadData()
+            return
+        }
+        tableView.reloadRows(at: [IndexPath(row: visibleIdx, section: 0)], with: .none)
+    }
+}
+
+// MARK: - MessagingCellStoryDelegate
+
+extension MessagingVC: MessagingCellStoryDelegate {
+
+    func messagingCellDidTapStory(attachmentId: String) {
+        guard let attachment = self.messages
+                .first(where: { $0.storyAttachment?.id == attachmentId })?
+                .storyAttachment,
+              attachment.status == .ready,
+              let url = attachment.fileURL,
+              FileManager.default.fileExists(atPath: url.path)
+        else { return }
+        let player = StoryPlayerVC()
+        player.storyAttachment = attachment
+        player.modalPresentationStyle = .fullScreen
+        present(player, animated: true)
+    }
+
+    func messagingCellDidTapStoryRetry(attachmentId: String) {
+        guard let attachment = self.messages
+                .first(where: { $0.storyAttachment?.id == attachmentId })?
+                .storyAttachment
+        else { return }
+        let convId = conversationManager.currentConversation?.id
+        StoryGenerationService.shared.submit(
+            title: attachment.title,
+            template: attachment.template,
+            jsonPayload: attachment.jsonPayload,
+            attachmentId: attachment.id,
+            conversationId: convId
+        )
+    }
+}
+#endif
 
 // MARK: - SlashCommandHost
 

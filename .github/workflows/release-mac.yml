@@ -1,134 +1,193 @@
-# Disabled until Apple signing/notarization secrets are added.
-# xcrun notarytool --wait will hang the runner with no diagnostics if secrets are missing.
-# Re-enable by uncommenting once the following repo secrets exist:
-#   APPLE_ID, APPLE_APP_PASSWORD, APPLE_TEAM_ID,
-#   MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD, MACOS_KEYCHAIN_PASSWORD
+# Builds, signs, notarizes, and publishes the LoopMac app + a Sparkle auto-update feed.
 #
-# name: release-mac
+# Required repo secrets:
+#   APPLE_ID, APPLE_APP_PASSWORD, APPLE_TEAM_ID   — notarization (notarytool)
+#   MACOS_CERTIFICATE_P12_BASE64                  — Developer ID Application cert (base64 .p12)
+#   MACOS_CERTIFICATE_PASSWORD                    — password for the .p12
+#   MACOS_KEYCHAIN_PASSWORD                       — ephemeral CI keychain password
+#   SPARKLE_ED_PRIVATE_KEY                        — Sparkle EdDSA private key (export with
+#                                                   `generate_keys -x private-key.pem`, paste file contents)
 #
-# on:
-#   push:
-#     branches: [main]
-#   workflow_dispatch:
-#
-# permissions:
-#   contents: write
-#
-# concurrency:
-#   group: release-mac
-#   cancel-in-progress: false
-#
-# jobs:
-#   build-and-release:
-#     name: Build, sign, notarize, release LoopMac
-#     runs-on: macos-14
-#     env:
-#       APPLE_ID: ${{ secrets.APPLE_ID }}
-#       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-#       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-#       SCHEME: LoopMac
-#       APP_NAME: Loop
-#       BUILD_DIR: build
-#       ARCHIVE_PATH: build/LoopMac.xcarchive
-#       EXPORT_PATH: build/export
-#     steps:
-#       - name: Checkout
-#         uses: actions/checkout@v4
-#
-#       - name: Select Xcode
-#         run: sudo xcode-select -s /Applications/Xcode_15.4.app
-#
-#       - name: Write Secrets.xcconfig from APPLE_TEAM_ID
-#         run: |
-#           printf 'DEVELOPMENT_TEAM = %s\n' "$APPLE_TEAM_ID" > Secrets.xcconfig
-#
-#       - name: Import Developer ID signing certificate
-#         uses: apple-actions/import-codesign-certs@v3
-#         with:
-#           p12-file-base64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-#           p12-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-#           keychain-password: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
-#
-#       - name: Stamp build number from run number
-#         run: |
-#           cd Loop.xcodeproj/..
-#           xcrun agvtool new-version -all "${{ github.run_number }}"
-#
-#       - name: Generate ExportOptions.plist
-#         run: |
-#           cat > ExportOptions.plist <<EOF
-#           <?xml version="1.0" encoding="UTF-8"?>
-#           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-#           <plist version="1.0">
-#           <dict>
-#             <key>method</key><string>developer-id</string>
-#             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
-#             <key>signingStyle</key><string>manual</string>
-#             <key>signingCertificate</key><string>Developer ID Application</string>
-#           </dict>
-#           </plist>
-#           EOF
-#
-#       - name: Archive
-#         run: |
-#           xcodebuild \
-#             -project Loop.xcodeproj \
-#             -scheme "$SCHEME" \
-#             -configuration Release \
-#             -archivePath "$ARCHIVE_PATH" \
-#             -destination 'generic/platform=macOS' \
-#             archive
-#
-#       - name: Export signed .app
-#         run: |
-#           xcodebuild -exportArchive \
-#             -archivePath "$ARCHIVE_PATH" \
-#             -exportOptionsPlist ExportOptions.plist \
-#             -exportPath "$EXPORT_PATH"
-#
-#       - name: Notarize .app
-#         run: |
-#           APP_PATH="$EXPORT_PATH/$APP_NAME.app"
-#           ZIP_PATH="$BUILD_DIR/$APP_NAME.zip"
-#           ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
-#           xcrun notarytool submit "$ZIP_PATH" \
-#             --apple-id "$APPLE_ID" \
-#             --password "$APPLE_APP_PASSWORD" \
-#             --team-id "$APPLE_TEAM_ID" \
-#             --wait
-#           xcrun stapler staple "$APP_PATH"
-#
-#       - name: Install create-dmg
-#         run: brew install create-dmg
-#
-#       - name: Build DMG
-#         run: |
-#           DMG_PATH="$BUILD_DIR/$APP_NAME-${{ github.run_number }}.dmg"
-#           create-dmg \
-#             --volname "$APP_NAME" \
-#             --window-size 600 400 \
-#             --icon "$APP_NAME.app" 175 190 \
-#             --app-drop-link 425 190 \
-#             --codesign "Developer ID Application" \
-#             "$DMG_PATH" \
-#             "$EXPORT_PATH/$APP_NAME.app"
-#           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
-#
-#       - name: Notarize DMG
-#         run: |
-#           xcrun notarytool submit "$DMG_PATH" \
-#             --apple-id "$APPLE_ID" \
-#             --password "$APPLE_APP_PASSWORD" \
-#             --team-id "$APPLE_TEAM_ID" \
-#             --wait
-#           xcrun stapler staple "$DMG_PATH"
-#
-#       - name: Create GitHub Release
-#         env:
-#           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-#         run: |
-#           TAG="v1.0-build${{ github.run_number }}"
-#           gh release create "$TAG" \
-#             "$DMG_PATH" \
-#             --title "Loop 1.0 (build ${{ github.run_number }})" \
-#             --notes "Auto-built from ${{ github.sha }}"
+# Outputs:
+#   - Per-build GitHub Release `v1.0-build<run>` with `Loop-<run>.dmg` (human download)
+#     and `Loop-<run>.zip` (the Sparkle update payload).
+#   - A fixed `appcast` release whose `appcast.xml` asset the app polls via SUFeedURL.
+#     The app's Info.plist SUFeedURL must point at:
+#       https://github.com/getathelas/LoopHarness/releases/download/appcast/appcast.xml
+
+name: release-mac
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-mac
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build, sign, notarize, release LoopMac
+    runs-on: macos-14
+    env:
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+      SCHEME: Loop_MacOS
+      APP_NAME: Loop
+      # Actual product wrapper name (PRODUCT_NAME = LoopMac); distinct from the
+      # user-facing APP_NAME used for DMG/zip filenames and the DMG volume.
+      APP_BUNDLE: LoopMac
+      SPARKLE_VERSION: "2.9.2"
+      BUILD_DIR: build
+      ARCHIVE_PATH: build/LoopMac.xcarchive
+      EXPORT_PATH: build/export
+      DOWNLOAD_REPO: getathelas/LoopHarness
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Write Secrets.xcconfig from APPLE_TEAM_ID
+        run: |
+          printf 'DEVELOPMENT_TEAM = %s\n' "$APPLE_TEAM_ID" > Secrets.xcconfig
+
+      - name: Import Developer ID signing certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          keychain-password: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+
+      - name: Stamp build number from run number
+        run: |
+          xcrun agvtool new-version -all "${{ github.run_number }}"
+
+      - name: Generate ExportOptions.plist
+        run: |
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>developer-id</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Developer ID Application</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Archive
+        run: |
+          xcodebuild \
+            -project Loop.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            -destination 'generic/platform=macOS' \
+            archive
+
+      - name: Export signed .app
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath "$EXPORT_PATH"
+
+      - name: Notarize and staple .app
+        run: |
+          APP_PATH="$EXPORT_PATH/$APP_BUNDLE.app"
+          NOTARIZE_ZIP="$BUILD_DIR/notarize.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$NOTARIZE_ZIP"
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build and notarize DMG
+        run: |
+          DMG_PATH="$BUILD_DIR/$APP_NAME-${{ github.run_number }}.dmg"
+          create-dmg \
+            --volname "$APP_NAME" \
+            --window-size 600 400 \
+            --icon "$APP_BUNDLE.app" 175 190 \
+            --app-drop-link 425 190 \
+            --codesign "Developer ID Application" \
+            "$DMG_PATH" \
+            "$EXPORT_PATH/$APP_BUNDLE.app"
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+
+      - name: Package Sparkle update zip (stapled .app)
+        run: |
+          # Re-zip AFTER stapling so the Sparkle payload carries the notarization
+          # ticket (the notarize.zip above held the un-stapled app).
+          ZIP_PATH="$BUILD_DIR/$APP_NAME-${{ github.run_number }}.zip"
+          ditto -c -k --keepParent "$EXPORT_PATH/$APP_BUNDLE.app" "$ZIP_PATH"
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+
+      - name: Download Sparkle CLI tools
+        run: |
+          curl -fsSL -o sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p sparkle-tools
+          tar -xf sparkle.tar.xz -C sparkle-tools
+          echo "SPARKLE_BIN=$PWD/sparkle-tools/bin" >> "$GITHUB_ENV"
+
+      - name: Generate signed appcast.xml
+        run: |
+          TAG="v1.0-build${{ github.run_number }}"
+          # generate_appcast scans a directory of archives, reads each app's
+          # CFBundleShortVersionString/CFBundleVersion, computes the EdDSA
+          # signature + length, and writes appcast.xml. --download-url-prefix
+          # makes the enclosure URLs point at the per-build release assets.
+          mkdir -p sparkle-feed
+          cp "$ZIP_PATH" sparkle-feed/
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > ed_private_key
+          "$SPARKLE_BIN/generate_appcast" \
+            --ed-key-file ed_private_key \
+            --download-url-prefix "https://github.com/${DOWNLOAD_REPO}/releases/download/${TAG}/" \
+            sparkle-feed/
+          rm -f ed_private_key
+          echo "APPCAST_PATH=$PWD/sparkle-feed/appcast.xml" >> "$GITHUB_ENV"
+
+      - name: Publish per-build release (DMG + Sparkle zip)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v1.0-build${{ github.run_number }}"
+          gh release create "$TAG" \
+            "$DMG_PATH" "$ZIP_PATH" \
+            --title "Loop 1.0 (build ${{ github.run_number }})" \
+            --notes "Auto-built from ${{ github.sha }}"
+
+      - name: Publish appcast feed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The `appcast` release is a fixed, stable home for the feed so
+          # SUFeedURL never changes. Create it once; thereafter clobber the asset.
+          gh release view appcast >/dev/null 2>&1 || \
+            gh release create appcast \
+              --title "Sparkle update feed" \
+              --notes "Auto-update appcast for LoopMac. Do not delete — SUFeedURL points here." \
+              --latest=false
+          gh release upload appcast "$APPCAST_PATH" --clobber

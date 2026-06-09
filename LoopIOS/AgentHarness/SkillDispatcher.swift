@@ -150,9 +150,23 @@ final class SkillDispatcher {
         if MuniRealtimeSkill.shared.handles(functionName: call.name) {
             MuniRealtimeSkill.shared.handle(functionCall: call, completion: completion); return
         }
+        if GoogleDriveSkill.shared.handles(functionName: call.name) {
+            GoogleDriveSkill.shared.handle(functionCall: call, completion: completion); return
+        }
+        if GoogleGmailSkill.shared.handles(functionName: call.name) {
+            GoogleGmailSkill.shared.handle(functionCall: call, completion: completion); return
+        }
+        if GoogleCalendarSkill.shared.handles(functionName: call.name) {
+            GoogleCalendarSkill.shared.handle(functionCall: call, completion: completion); return
+        }
         #if canImport(HealthKit) && os(iOS)
         if HealthSkill.shared.handles(functionName: call.name) {
             HealthSkill.shared.handle(functionCall: call, completion: completion); return
+        }
+        #endif
+        #if os(iOS)
+        if StorySkill.shared.handles(functionName: call.name) {
+            StorySkill.shared.handle(functionCall: call, completion: completion); return
         }
         #endif
 
