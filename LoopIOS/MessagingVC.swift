@@ -1369,6 +1369,10 @@ extension MessagingVC: MessageBoxDelegate {
             conversationId: requestConversationId
         )
 
+        // Reset the anti-loop guard so prior tool-call patterns don't
+        // bleed into the new user turn.
+        ToolCallGuard.shared.resetForNewTurn()
+
         let initialContext = self.chatContextMessages
         self.beginStreamingTurn()
         let localTurnToken = UUID().uuidString

@@ -337,6 +337,15 @@ final class AgentHarness {
         if !agents.isEmpty     { sections.append("# AGENTS\n\(agents)") }
         if !heartbeat.isEmpty  { sections.append("# HEARTBEAT\n\(heartbeat)") }
         if !toolsDoc.isEmpty   { sections.append(toolsDoc) }
+
+        // Layer 4 — anti-loop prompt injection. When the ToolCallGuard
+        // detects repeated tool calls, inject a strong system reminder
+        // telling the model to stop looping and use existing data.
+        if ToolCallGuard.shared.shouldInjectLoopReminder {
+            sections.append(ToolCallGuard.loopReminderPrompt)
+            ToolCallGuard.shared.consumeLoopReminder()
+        }
+
         return sections.joined(separator: "\n\n")
     }
 
