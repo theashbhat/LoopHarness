@@ -303,6 +303,10 @@ class MainVC: MessagingVC {
         refreshAvatarVisibility()
     }
 
+    override func messagesDidReload() {
+        refreshAvatarVisibility()
+    }
+
     override func loadConversation(_ conversation: SimpleConversation) {
         super.loadConversation(conversation)
         refreshAvatarVisibility()
