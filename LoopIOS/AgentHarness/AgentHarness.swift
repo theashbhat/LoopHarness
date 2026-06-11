@@ -140,6 +140,9 @@ final class AgentHarness {
         #if os(iOS) || os(macOS)
         catalog.append(("Stories", "Generate a 1080×1920 animated HTML story / infographic that renders as a tappable card", StorySkill.tools))
         #endif
+        #if os(iOS)
+        catalog.append(("Browse", "Drive a real WebKit browser on-device to render and navigate JS-heavy pages, with a live preview card + scrubbable replay", BrowseSkill.tools))
+        #endif
         return catalog
     }()
 
@@ -181,6 +184,9 @@ final class AgentHarness {
         #endif
         #if os(iOS) || os(macOS)
         fragments.append(StorySkill.systemPromptFragment)
+        #endif
+        #if os(iOS)
+        fragments.append(BrowseSkill.systemPromptFragment)
         #endif
         self.toolsDoc = fragments.joined(separator: "\n\n")
         self.staticToolsDocLength = toolsDoc.count

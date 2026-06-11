@@ -168,6 +168,9 @@ final class SkillDispatcher {
         if StorySkill.shared.handles(functionName: call.name) {
             StorySkill.shared.handle(functionCall: call, completion: completion); return
         }
+        if BrowseSkill.shared.handles(functionName: call.name) {
+            BrowseSkill.shared.handle(functionCall: call, completion: completion); return
+        }
         #endif
 
         // Runtime-registered skills (Mac-only). Checked under the lock so a

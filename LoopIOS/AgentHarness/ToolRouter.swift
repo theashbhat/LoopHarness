@@ -130,6 +130,14 @@ struct ToolRouter {
         ], toolNames: [
             "generate_story",
         ]),
+        SkillGroup(name: "browse", keywords: [
+            "browse", "open the", "go to", "visit", "navigate to", "website",
+            "web page", "webpage", "homepage", "home page", "render",
+            "what's on", "whats on", "check the", "look at the page",
+            "load the", "the site", "click through", "screenshot the",
+        ], toolNames: [
+            "browse",
+        ]),
         SkillGroup(name: "twitter", keywords: [
             "tweet", "twitter", "x.com", "post tweet",
         ], toolNames: [
@@ -183,6 +191,11 @@ struct ToolRouter {
         "save_skill", "list_skills", "delete_skill",
         // Spec builder
         "publish_spec_to_notion",
+        // Browse — the internal per-step action tool used by BrowseSession's
+        // nested model loop. Kept here so tool-routing on those nested calls
+        // never strips it (the page-state observations would otherwise match
+        // an unrelated skill group and filter browse_action out).
+        "browse_action",
     ]
 
     // MARK: - Selection

@@ -142,6 +142,11 @@ struct MessageStruct {
     /// when the model calls `generate_story`. Renders as a scaled card in chat;
     /// tap opens the full-screen story player with tap-to-advance navigation.
     var storyAttachment: StoryAttachment? = nil
+    /// Live/replayable browse session (WebKit driver). Set by
+    /// BrowseGenerationService when the model calls `browse`. Renders as a live
+    /// preview card in chat; tap opens the full-screen read-only live view, and
+    /// once the session ends the card flips into a scrubbable replay.
+    var browseAttachment: BrowseAttachment? = nil
     /// Set when this message belongs to the conversational onboarding flow.
     /// Drives `MessagingCell` to render an interactive card (text field,
     /// choice buttons, key paste, etc.) under the message body. Onboarding
@@ -197,6 +202,7 @@ struct MessageStruct {
          fileAttachment: FileAttachment? = nil,
          mapAttachment: MapAttachment? = nil,
          storyAttachment: StoryAttachment? = nil,
+         browseAttachment: BrowseAttachment? = nil,
          onboardingCard: OnboardingCardKind? = nil,
          reasoningContent: String? = nil,
          tokenUsage: TokenUsage? = nil,
@@ -223,6 +229,7 @@ struct MessageStruct {
         self.fileAttachment = fileAttachment
         self.mapAttachment = mapAttachment
         self.storyAttachment = storyAttachment
+        self.browseAttachment = browseAttachment
         self.onboardingCard = onboardingCard
         self.reasoningContent = reasoningContent
         self.tokenUsage = tokenUsage
@@ -608,6 +615,9 @@ var tools: [[String: Any]] = {
     #endif
     #if os(iOS) || os(macOS)
     all += StorySkill.tools
+    #endif
+    #if os(iOS)
+    all += BrowseSkill.tools
     #endif
     // Dynamic, user-authored skills get appended in AgentHarness at every
     // chat turn so newly hot-loaded skills become visible without restart.

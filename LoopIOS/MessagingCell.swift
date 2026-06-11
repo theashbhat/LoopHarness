@@ -44,6 +44,12 @@ protocol MessagingCellStoryDelegate: AnyObject {
     func messagingCellDidTapStoryRetry(attachmentId: String)
 }
 
+/// Tap-callback from a browse preview card. Set on cells carrying a browse
+/// attachment so MessagingVC can present the full-screen live/replay player.
+protocol MessagingCellBrowseDelegate: AnyObject {
+    func messagingCellDidTapBrowse(attachmentId: String)
+}
+
 /// Tap-callback from the inline "Used N tools" disclosure row. Set on cells
 /// that render an assistant turn carrying tool calls so MessagingVC can toggle
 /// the row's expanded/collapsed state.
@@ -310,6 +316,68 @@ class MessagingCell: UITableViewCell {
     private var currentStoryAttachmentId: String?
     weak var storyDelegate: MessagingCellStoryDelegate?
 
+    // MARK: - Inline browse preview card (browse)
+    private lazy var browseCardView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.layer.cornerRadius = 16
+        v.clipsToBounds = true
+        v.backgroundColor = UIColor.secondarySystemBackground
+        v.isHidden = true
+        v.isUserInteractionEnabled = true
+        return v
+    }()
+    private lazy var browseThumbnail: UIImageView = {
+        let v = UIImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.contentMode = .scaleAspectFill
+        v.clipsToBounds = true
+        v.backgroundColor = UIColor.tertiarySystemBackground
+        return v
+    }()
+    private lazy var browseSpinner: UIActivityIndicatorView = {
+        let s = UIActivityIndicatorView(style: .medium)
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.hidesWhenStopped = true
+        return s
+    }()
+    private lazy var browseGlyph: UIImageView = {
+        let v = UIImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        v.image = UIImage(systemName: "globe", withConfiguration: cfg)
+        v.tintColor = .secondaryLabel
+        v.contentMode = .scaleAspectFit
+        return v
+    }()
+    private lazy var browseHostLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        l.textColor = .label
+        l.numberOfLines = 1
+        l.lineBreakMode = .byTruncatingTail
+        return l
+    }()
+    private lazy var browsePill: PaddedLabel = {
+        let l = PaddedLabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 11, weight: .bold)
+        l.textColor = .white
+        l.layer.cornerRadius = 8
+        l.clipsToBounds = true
+        l.textAlignment = .center
+        return l
+    }()
+    private lazy var browseTapRecognizer: UITapGestureRecognizer = {
+        let r = UITapGestureRecognizer(target: self, action: #selector(handleBrowseTap))
+        r.numberOfTapsRequired = 1
+        return r
+    }()
+    private var browseCardConstraints: [NSLayoutConstraint] = []
+    private var currentBrowseAttachmentId: String?
+    weak var browseDelegate: MessagingCellBrowseDelegate?
+
     // MARK: - Inline map attachment views (MapsSkill)
     /// Caption label shown above the map (optional — hidden when nil).
     private lazy var mapTitleLabel: UILabel = {
@@ -516,6 +584,17 @@ class MessagingCell: UITableViewCell {
         NSLayoutConstraint.deactivate(storyCardConstraints)
         storyCardConstraints.removeAll()
 
+        // Browse card cleanup — same recycle hygiene as the story card.
+        browseCardView.isHidden = true
+        browseThumbnail.image = nil
+        browseHostLabel.text = nil
+        browsePill.text = nil
+        browseSpinner.stopAnimating()
+        browseSpinner.isHidden = true
+        currentBrowseAttachmentId = nil
+        NSLayoutConstraint.deactivate(browseCardConstraints)
+        browseCardConstraints.removeAll()
+
         // Map cleanup — drop annotations so a recycled cell doesn't briefly
         // show the previous message's pins.
         mapView.removeAnnotations(mapView.annotations)
@@ -681,6 +760,13 @@ class MessagingCell: UITableViewCell {
         // with title + play glyph; tap opens the full-screen story player.
         if let storyAttachment = data.storyAttachment {
             applyStoryAttachment(storyAttachment, modelLabelText: modelText(for: data))
+            return
+        }
+
+        // Inline browse preview card (browse). Shows the latest screenshot +
+        // host + a status pill; tap opens the full-screen live/replay player.
+        if let browseAttachment = data.browseAttachment {
+            applyBrowseAttachment(browseAttachment, modelLabelText: modelText(for: data))
             return
         }
 
@@ -1966,6 +2052,7 @@ class MessagingCell: UITableViewCell {
         attachmentErrorLabel.isHidden = true
         downloadButton.isHidden = true
         retryButton.isHidden = true
+        browseCardView.isHidden = true
 
         if storyCardView.superview == nil {
             self.contentView.addSubview(storyCardView)
@@ -2064,6 +2151,126 @@ class MessagingCell: UITableViewCell {
     @objc private func handleStoryRetryTap() {
         guard let id = currentStoryAttachmentId else { return }
         storyDelegate?.messagingCellDidTapStoryRetry(attachmentId: id)
+    }
+
+    // MARK: - Browse preview card
+
+    private func applyBrowseAttachment(_ attachment: BrowseAttachment,
+                                       modelLabelText: String) {
+        currentBrowseAttachmentId = attachment.id
+
+        // Hide every other render path's views; the browse card takes the row.
+        profileImageView.isHidden = true
+        textView.isHidden = true
+        animatingtextView.isHidden = true
+        actionButton.isHidden = true
+        shimmerLabel.isHidden = true
+        modelLabel.isHidden = false
+        attachmentImageView.isHidden = true
+        attachmentSpinner.stopAnimating()
+        attachmentSpinner.isHidden = true
+        attachmentErrorLabel.isHidden = true
+        downloadButton.isHidden = true
+        retryButton.isHidden = true
+        storyCardView.isHidden = true
+
+        if browseCardView.superview == nil {
+            self.contentView.addSubview(browseCardView)
+            browseCardView.addSubview(browseThumbnail)
+            browseCardView.addSubview(browseSpinner)
+            browseCardView.addSubview(browseGlyph)
+            browseCardView.addSubview(browseHostLabel)
+            browseCardView.addSubview(browsePill)
+        }
+        if browseTapRecognizer.view !== browseCardView {
+            browseCardView.addGestureRecognizer(browseTapRecognizer)
+        }
+        browseCardView.isHidden = false
+
+        let cardWidth: CGFloat = 232
+        let thumbHeight: CGFloat = 132
+        let footerHeight: CGFloat = 40
+
+        browseCardConstraints = [
+            browseCardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            browseCardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            browseCardView.widthAnchor.constraint(equalToConstant: cardWidth),
+
+            browseThumbnail.topAnchor.constraint(equalTo: browseCardView.topAnchor),
+            browseThumbnail.leadingAnchor.constraint(equalTo: browseCardView.leadingAnchor),
+            browseThumbnail.trailingAnchor.constraint(equalTo: browseCardView.trailingAnchor),
+            browseThumbnail.heightAnchor.constraint(equalToConstant: thumbHeight),
+
+            browseSpinner.centerXAnchor.constraint(equalTo: browseThumbnail.centerXAnchor),
+            browseSpinner.centerYAnchor.constraint(equalTo: browseThumbnail.centerYAnchor),
+
+            browseGlyph.leadingAnchor.constraint(equalTo: browseCardView.leadingAnchor, constant: 12),
+            browseGlyph.topAnchor.constraint(equalTo: browseThumbnail.bottomAnchor, constant: 12),
+
+            browseHostLabel.leadingAnchor.constraint(equalTo: browseGlyph.trailingAnchor, constant: 6),
+            browseHostLabel.centerYAnchor.constraint(equalTo: browseGlyph.centerYAnchor),
+
+            browsePill.leadingAnchor.constraint(greaterThanOrEqualTo: browseHostLabel.trailingAnchor, constant: 8),
+            browsePill.trailingAnchor.constraint(equalTo: browseCardView.trailingAnchor, constant: -12),
+            browsePill.centerYAnchor.constraint(equalTo: browseGlyph.centerYAnchor),
+
+            browseCardView.bottomAnchor.constraint(equalTo: browseThumbnail.bottomAnchor, constant: footerHeight),
+
+            modelLabel.leadingAnchor.constraint(equalTo: browseCardView.leadingAnchor),
+            modelLabel.topAnchor.constraint(equalTo: browseCardView.bottomAnchor, constant: 6),
+            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: modelLabel.bottomAnchor, constant: 12),
+        ]
+        NSLayoutConstraint.activate(browseCardConstraints)
+
+        browseHostLabel.text = attachment.displayHost
+
+        // Thumbnail — latest captured screenshot, if any yet.
+        if let path = attachment.latestThumbnailPath,
+           let img = UIImage(contentsOfFile: path) {
+            browseThumbnail.image = img
+        }
+
+        // Status pill.
+        browsePill.text = attachment.pillText.uppercased()
+        browsePill.textInsets = UIEdgeInsets(top: 3, left: 7, bottom: 3, right: 7)
+        switch attachment.status {
+        case .navigating:
+            browsePill.backgroundColor = .systemBlue
+            browseSpinner.isHidden = browseThumbnail.image != nil
+            if browseThumbnail.image == nil { browseSpinner.startAnimating() } else { browseSpinner.stopAnimating() }
+            browseTapRecognizer.isEnabled = true
+        case .reading:
+            browsePill.backgroundColor = .systemIndigo
+            browseSpinner.stopAnimating()
+            browseSpinner.isHidden = true
+            browseTapRecognizer.isEnabled = true
+        case .done:
+            browsePill.backgroundColor = .systemGreen
+            browseSpinner.stopAnimating()
+            browseSpinner.isHidden = true
+            browseTapRecognizer.isEnabled = true
+        case .failed:
+            browsePill.text = "FAILED"
+            browsePill.backgroundColor = .systemRed
+            browseSpinner.stopAnimating()
+            browseSpinner.isHidden = true
+            browseHostLabel.text = attachment.failureReason ?? attachment.displayHost
+            browseTapRecognizer.isEnabled = true
+        }
+
+        baseModelText = modelLabelText
+        modelLabel.text = modelLabelText
+        modelLabel.textColor = .secondaryLabel
+        modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+        modelLabel.numberOfLines = 1
+        ttsIndicator.stopAnimating()
+        ttsIndicator.isHidden = true
+        setNeedsLayout()
+    }
+
+    @objc private func handleBrowseTap() {
+        guard let id = currentBrowseAttachmentId else { return }
+        browseDelegate?.messagingCellDidTapBrowse(attachmentId: id)
     }
 
     override func layoutSubviews() {

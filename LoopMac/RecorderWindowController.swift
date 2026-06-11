@@ -410,8 +410,17 @@ final class RecorderWindowController: NSWindowController, NSTextFieldDelegate, N
     }
 
     private func positionAtBottomCenter() {
-        guard let window = window,
-              let screen = NSScreen.main else { return }
+        guard let window = window else { return }
+        // Surface on the screen the cursor is on, not `NSScreen.main`.
+        // `NSScreen.main` tracks the *key* window, which — when Loop is in the
+        // background and the user triggers ctrl+fn from another app — is
+        // whatever window they last focused, frequently on a different monitor
+        // (a different "desktop") than where their attention currently is. The
+        // cursor is the most reliable proxy for the active display, matching
+        // how Spotlight / Raycast pick their screen.
+        let mouse = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+            ?? NSScreen.main else { return }
         let frame = window.frame
         let visible = screen.visibleFrame
         let originX = visible.midX - frame.width / 2
@@ -559,6 +568,16 @@ final class RecorderWindowController: NSWindowController, NSTextFieldDelegate, N
         // NSTextField. Forcing it enabled here makes focusTextInput safe to
         // call from any state transition.
         textField.isEnabled = true
+        // Force a layout pass before focusing. makeFirstResponder makes AppKit
+        // install a field editor (RecorderFieldEditor) sized to the text
+        // field's current frame — and on the very first show no layout has run
+        // yet, so the field would come up zero-width and render nothing (no
+        // caret, no placeholder) until some later layout. Previously that
+        // "later layout" only happened after the first send
+        // (adjustWindowHeightToFitText), which is why the field stayed blank
+        // until you sent a message. Laying out here gives the field a real
+        // frame so the editor surfaces the moment the bar gains focus.
+        window.contentView?.layoutSubtreeIfNeeded()
         window.makeFirstResponder(textField)
         installClickAwayMonitorIfNeeded()
     }

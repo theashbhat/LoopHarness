@@ -475,6 +475,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // And for StoryGenerationService — placeholder story card on submit,
         // swap to ready/failed when the HTML story render finishes.
         StoryGenerationService.shared.host = self
+        BrowseGenerationService.shared.host = self
         // CalendarSkill needs a UI host so it can present
         // EKEventEditViewController for the user to review proposed events
         // before they're saved.
@@ -3286,6 +3287,7 @@ extension MessagingVC: UITableViewDelegate, UITableViewDataSource {
         cell.pdfDelegate = self
         #if os(iOS)
         cell.storyDelegate = self
+        cell.browseDelegate = self
         #endif
         cell.onboardingDelegate = self
         configureToolDisclosure(for: cell, message: message)
@@ -4329,6 +4331,76 @@ extension MessagingVC: MessagingCellStoryDelegate {
             attachmentId: attachment.id,
             conversationId: convId
         )
+    }
+}
+
+// MARK: - BrowseSkillHost
+
+extension MessagingVC: BrowseSkillHost {
+
+    func browseSkillDidStart(_ attachment: BrowseAttachment) {
+        // A placeholder for this id may already exist if the model re-emits;
+        // update in place rather than dropping a second card.
+        if let idx = self.messages.firstIndex(where: { $0.browseAttachment?.id == attachment.id }) {
+            self.messages[idx].browseAttachment = attachment
+            DispatchQueue.main.async { self.reloadBrowseRow(attachmentId: attachment.id) }
+            return
+        }
+        let placeholder = MessageStruct(
+            id: "browse-\(attachment.id)",
+            role: "assistant",
+            content: "",
+            model: "loop-browse",
+            browseAttachment: attachment
+        )
+        let conversation = ensureCurrentConversation()
+        conversationManager.addMessage(placeholder, to: conversation)
+        currentConversationEntity = conversationManager.currentConversation
+        self.messages.append(placeholder)
+        DispatchQueue.main.async {
+            self.tableView.reloadData()
+            self.scrollToLastMessage()
+        }
+    }
+
+    func browseSkillDidUpdate(_ attachment: BrowseAttachment) {
+        guard let idx = self.messages.firstIndex(where: { $0.browseAttachment?.id == attachment.id }) else { return }
+        self.messages[idx].browseAttachment = attachment
+        DispatchQueue.main.async { self.reloadBrowseRow(attachmentId: attachment.id) }
+    }
+
+    func browseSkillDidFinish(_ attachment: BrowseAttachment) {
+        guard let idx = self.messages.firstIndex(where: { $0.browseAttachment?.id == attachment.id }) else { return }
+        self.messages[idx].browseAttachment = attachment
+        DispatchQueue.main.async { self.reloadBrowseRow(attachmentId: attachment.id) }
+    }
+
+    /// Same row-count-drift guard as `reloadStoryRow` — fall back to a full
+    /// reload on any mismatch so we never trip "Invalid batch updates".
+    private func reloadBrowseRow(attachmentId: String) {
+        let expectedRows = visible_messages.count + (ai_state != .None ? 1 : 0)
+        guard tableView.numberOfRows(inSection: 0) == expectedRows,
+              let visibleIdx = visible_messages.firstIndex(where: { $0.browseAttachment?.id == attachmentId })
+        else {
+            tableView.reloadData()
+            return
+        }
+        tableView.reloadRows(at: [IndexPath(row: visibleIdx, section: 0)], with: .none)
+    }
+}
+
+// MARK: - MessagingCellBrowseDelegate
+
+extension MessagingVC: MessagingCellBrowseDelegate {
+    func messagingCellDidTapBrowse(attachmentId: String) {
+        guard let attachment = self.messages
+                .first(where: { $0.browseAttachment?.id == attachmentId })?
+                .browseAttachment
+        else { return }
+        let player = BrowsePlayerVC()
+        player.attachment = attachment
+        player.modalPresentationStyle = .fullScreen
+        present(player, animated: true)
     }
 }
 #endif
