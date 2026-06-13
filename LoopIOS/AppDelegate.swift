@@ -210,10 +210,17 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     // MARK: - Tap routing helpers
 
     private func openPrefetchedConversation(id: String) {
+        // Cold-start tap (app was killed when the cron/runner push is tapped):
+        // MessagingVC isn't in the window yet and/or the store hasn't hydrated,
+        // so both lookups below return nil. Stash the request so MessagingVC
+        // honors it once it's ready (viewDidLoad / store-ready drain).
         guard let messagingVC = Self.findMessagingVC(),
-              let conv = SimpleConversationManager.shared.getConversation(by: id) else { return }
+              let conv = SimpleConversationManager.shared.getConversation(by: id) else {
+            PendingConversationOpen.shared.set(id)
+            return
+        }
         DispatchQueue.main.async {
-            messagingVC.loadConversation(conv)
+            messagingVC.openConversationFromNotification(conv)
         }
     }
 

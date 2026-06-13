@@ -679,6 +679,12 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // so the share lands on the chip regardless of which hook fired first.
         drainAppGroupInbox()
 
+        // Honor a conversation-open request stashed by a notification tap that
+        // landed before this VC existed. If the store is already hydrated this
+        // opens it now; otherwise the id waits and the store-ready path below
+        // drains it.
+        consumePendingConversationOpen()
+
         // Do any additional setup after loading the view.
     }
 
@@ -778,6 +784,9 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             guard let self = self else { return }
             if let token = token { NotificationCenter.default.removeObserver(token) }
             self.setConversationChromeLoading(false)
+            // A notification tapped during cold start wins over the default
+            // restore: open the tapped conversation instead of the last one.
+            if self.consumePendingConversationOpen() { return }
             if self.currentConversationEntity == nil {
                 self.loadLastConversation()
             }
@@ -827,6 +836,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         DispatchQueue.main.async {
             self.tableView.reloadData()
             self.scrollToLastMessage()
+            self.messagesDidReload()
         }
 
         // For a VM-backed conversation, the assistant turn is written remotely
@@ -859,10 +869,57 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // Reload table view
         DispatchQueue.main.async {
             self.tableView.reloadData()
+            self.messagesDidReload()
 //            self.messageBox.textView.becomeFirstResponder()
         }
     }
+
+    /// Hook fired after the on-screen message set is rebuilt from scratch —
+    /// cold-start restore, a conversation switch, or a reset to the empty/new
+    /// chat. Subclasses override to keep avatar/chrome state in sync with what
+    /// is actually rendered (the explicit refresh call sites miss async paths
+    /// like the store-ready restore that populates `messages` long after
+    /// viewDidLoad). Default is a no-op. Always invoked on the main thread.
+    func messagesDidReload() {}
     
+    /// Open a conversation in response to a notification tap. Unlike a plain
+    /// `loadConversation` (which only swaps the data), this also surfaces the
+    /// chat: a tap should land the user *inside* the conversation even if a
+    /// modal or the large agent orb was covering it. `bringChatToFront` is the
+    /// overridable hook for that (MainVC dismisses the orb / pops the stack).
+    func openConversationFromNotification(_ conversation: SimpleConversation) {
+        bringChatToFront()
+        loadConversation(conversation)
+    }
+
+    /// Make this chat surface visible before loading a notification-tapped
+    /// conversation. Base behavior: drop any presented modal and pop to this
+    /// VC. Subclasses (MainVC) extend this to also tear down the large agent
+    /// view that would otherwise cover the chat.
+    func bringChatToFront() {
+        presentedViewController?.dismiss(animated: false)
+        navigationController?.popToViewController(self, animated: false)
+    }
+
+    /// Drain a conversation-open request stashed by a cold-start notification
+    /// tap (`AppDelegate.openPrefetchedConversation` couldn't resolve the chat
+    /// at tap time). Called from `viewDidLoad` and again on store-ready, since
+    /// the conversation only becomes resolvable once the store hydrates.
+    /// Holds the id (doesn't `take()`) until the store is ready, so an early
+    /// `viewDidLoad` call doesn't discard a request the store can't yet
+    /// resolve. Returns true when it actually opened a conversation, so the
+    /// store-ready path knows to skip its default "load last conversation".
+    @discardableResult
+    func consumePendingConversationOpen() -> Bool {
+        guard ConversationFileStore.shared.isReady,
+              let id = PendingConversationOpen.shared.take() else { return false }
+        // Id is now consumed even if it no longer resolves — a deleted/stale
+        // conversation shouldn't keep hijacking later launches.
+        guard let conversation = conversationManager.getConversation(by: id) else { return false }
+        openConversationFromNotification(conversation)
+        return true
+    }
+
     func loadConversation(_ conversation: SimpleConversation) {
         currentConversationEntity = conversation
         conversationManager.currentConversation = conversation

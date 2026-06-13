@@ -511,6 +511,7 @@ class MessagingCell: UITableViewCell {
 
         // Reset the swipe-to-reveal slide so a recycled cell doesn't carry over
         // a mid-swipe offset, and clear the stale time text.
+        timeRevealOffset = 0
         contentView.transform = .identity
         timeLabel.text = nil
 
@@ -1066,12 +1067,27 @@ class MessagingCell: UITableViewCell {
             : Self.dayTimeFormatter.string(from: date)
     }
 
+    /// Current swipe-reveal slide offset, retained so `layoutSubviews` can
+    /// re-assert the transform. `UITableViewCell.layoutSubviews` sets
+    /// `contentView.frame = bounds`, which cancels a translation transform's
+    /// visible offset — and the nav-orb's display-link animation invalidates
+    /// the view tree every frame, so that reset fires continuously during a
+    /// drag. The net effect was the slide only appearing on release (when the
+    /// explicit spring animation took over). Re-applying after every layout
+    /// keeps the live drag visible.
+    private var timeRevealOffset: CGFloat = 0
+
     /// Slides the whole row left by `offset` points to reveal the timestamp.
     /// Driven by MessagingVC's pan so every visible cell moves in lock-step.
     func setTimeRevealOffset(_ offset: CGFloat) {
-        contentView.transform = offset == 0
+        timeRevealOffset = offset
+        applyTimeRevealTransform()
+    }
+
+    private func applyTimeRevealTransform() {
+        contentView.transform = timeRevealOffset == 0
             ? .identity
-            : CGAffineTransform(translationX: -offset, y: 0)
+            : CGAffineTransform(translationX: -timeRevealOffset, y: 0)
     }
     
     func attributedString(from text: String) -> NSAttributedString {
@@ -2274,7 +2290,23 @@ class MessagingCell: UITableViewCell {
     }
 
     override func layoutSubviews() {
+        // While a swipe-reveal slide is active, clear the transform BEFORE
+        // super lays out. `UITableViewCell.layoutSubviews` sets
+        // `contentView.frame = bounds`; if the transform is non-identity at
+        // that moment, UIKit shifts the layer's center to compensate, leaving
+        // the transform property set but the visible offset cancelled (which
+        // is why the slide only appeared on release, when the explicit
+        // animation took over). Laying out with an identity transform keeps
+        // the frame clean, then we re-apply the slide on top of it. Only do
+        // this mid-slide so the release spring animation (offset == 0) runs
+        // untouched.
+        if timeRevealOffset != 0 {
+            contentView.transform = .identity
+        }
         super.layoutSubviews()
+        if timeRevealOffset != 0 {
+            applyTimeRevealTransform()
+        }
         // CALayer frames aren't driven by Auto Layout — keep the story card's
         // gradient sized to the card whenever the card is on screen.
         if !storyCardView.isHidden {
