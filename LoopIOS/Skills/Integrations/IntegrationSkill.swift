@@ -511,6 +511,8 @@ Tips:
         case .googleWorkspaceRefreshToken: return "google_workspace_refresh_token"
         case .googleWorkspaceClientId:     return "google_workspace_client_id"
         case .googleWorkspaceClientSecret: return "google_workspace_client_secret"
+        case .agentMail:                   return "agentmail"
+        case .agentMailInbox:              return "agentmail_inbox"
         }
     }
 

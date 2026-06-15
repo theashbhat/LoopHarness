@@ -159,6 +159,9 @@ final class SkillDispatcher {
         if GoogleCalendarSkill.shared.handles(functionName: call.name) {
             GoogleCalendarSkill.shared.handle(functionCall: call, completion: completion); return
         }
+        if AgentMailSkill.shared.handles(functionName: call.name) {
+            AgentMailSkill.shared.handle(functionCall: call, completion: completion); return
+        }
         #if canImport(HealthKit) && os(iOS)
         if HealthSkill.shared.handles(functionName: call.name) {
             HealthSkill.shared.handle(functionCall: call, completion: completion); return

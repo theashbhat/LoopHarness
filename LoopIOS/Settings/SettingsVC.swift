@@ -41,7 +41,7 @@ final class SettingsVC: UIViewController {
 
     private func buildSections() -> [Section] {
         let main: Section = isOpenClawActive ? openClawMainSection() : localMainSection()
-        return [
+        let sections: [Section] = [
             Section(header: "Core", rows: [
                 Row(title: "Execution Backend", icon: "externaldrive.badge.icloud") { settings in
                     settings.navigationController?.pushViewController(ExecutionBackendVC(), animated: true)
@@ -62,6 +62,17 @@ final class SettingsVC: UIViewController {
                 }
             ]),
         ]
+        return AppFlags.isManaged ? hidingManagedRows(sections) : sections
+    }
+
+    /// Managed builds pin the backend and lock down model/skills/SSH, so drop
+    /// those rows (and any section left empty — e.g. "Core") from Settings.
+    private func hidingManagedRows(_ sections: [Section]) -> [Section] {
+        let hidden: Set<String> = ["Execution Backend", "Model", "Skills", "SSH"]
+        return sections.compactMap { section in
+            let rows = section.rows.filter { !hidden.contains($0.title) }
+            return rows.isEmpty ? nil : Section(header: section.header, rows: rows)
+        }
     }
 
     /// Local backend (the app's original on-device settings).

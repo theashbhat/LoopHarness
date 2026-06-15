@@ -610,6 +610,7 @@ var tools: [[String: Any]] = {
     all += GoogleDriveSkill.tools
     all += GoogleGmailSkill.tools
     all += GoogleCalendarSkill.tools
+    all += AgentMailSkill.tools
     #if canImport(HealthKit) && os(iOS)
     all += HealthSkill.tools
     #endif

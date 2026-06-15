@@ -923,6 +923,9 @@ The current date and time is \(now).
         if GoogleCalendarSkill.shared.handles(functionName: function.name) {
             GoogleCalendarSkill.shared.handle(functionCall: function, completion: cont); return
         }
+        if AgentMailSkill.shared.handles(functionName: function.name) {
+            AgentMailSkill.shared.handle(functionCall: function, completion: cont); return
+        }
         // Remote MCP servers the user has installed — routed before the
         // dynamic JS registry since both land in the same trailing section
         // of the advertised tool schemas.
@@ -962,6 +965,7 @@ The current date and time is \(now).
         if let s = GoogleDriveSkill.shared.statusText(for: call) { return s }
         if let s = GoogleGmailSkill.shared.statusText(for: call) { return s }
         if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
+        if let s = AgentMailSkill.shared.statusText(for: call) { return s }
         if let s = MapsSkill.shared.statusText(for: call) { return s }
         if let s = GeocodingSkill.shared.statusText(for: call) { return s }
         if let s = NavigationSkill.shared.statusText(for: call) { return s }

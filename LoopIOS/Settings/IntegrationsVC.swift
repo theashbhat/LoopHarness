@@ -181,11 +181,7 @@ final class IntegrationsVC: UIViewController {
     }
 
     private func pushGitHubKeyEditor(_ key: KeyStore.Key) {
-        guard let nav = navigationController else { return }
-        var stack = nav.viewControllers
-        stack.append(KeysVC())
-        stack.append(KeyEditVC(focusing: key))
-        nav.setViewControllers(stack, animated: true)
+        navigationController?.pushViewController(KeyEditVC(focusing: key), animated: true)
     }
 
     /// Devin coding agent. Connection state is "did the user paste BOTH a
@@ -256,14 +252,10 @@ final class IntegrationsVC: UIViewController {
     }
 
     private func pushDevinEditor(_ key: KeyStore.Key) {
-        guard let nav = navigationController else { return }
-        var stack = nav.viewControllers
-        stack.append(KeysVC())
-        // KeyEditVC now edits a whole service (Devin = API key + org id) in a
+        // KeyEditVC edits a whole service (Devin = API key + org id) in a
         // single panel; `focusing:` lands the user on the specific field they
         // came to set (api key vs. org id) without losing the other field.
-        stack.append(KeyEditVC(focusing: key))
-        nav.setViewControllers(stack, animated: true)
+        navigationController?.pushViewController(KeyEditVC(focusing: key), animated: true)
     }
 
     /// Notion is token-backed — connection state is "did the user paste an
@@ -302,11 +294,7 @@ final class IntegrationsVC: UIViewController {
     }
 
     private func pushNotionKeyEditor() {
-        guard let nav = navigationController else { return }
-        var stack = nav.viewControllers
-        stack.append(KeysVC())
-        stack.append(KeyEditVC(focusing: .notionIntegrationToken))
-        nav.setViewControllers(stack, animated: true)
+        navigationController?.pushViewController(KeyEditVC(focusing: .notionIntegrationToken), animated: true)
     }
 
     /// Slack is a personal-only integration in v1 — connection state is just
@@ -345,15 +333,11 @@ final class IntegrationsVC: UIViewController {
         }
     }
 
-    /// Push the Keys list + the specific key editor in one shot so back from
-    /// the editor lands on Keys (not Integrations). Mirrors the Mac surface,
-    /// where the Keys window opens with the row pre-selected.
+    /// Push the key editor directly onto the Integrations stack so Back from
+    /// the editor returns to Integrations (where the user tapped in), not the
+    /// generic Keys list. `focusing:` lands them on the specific field.
     private func pushSlackKeyEditor() {
-        guard let nav = navigationController else { return }
-        var stack = nav.viewControllers
-        stack.append(KeysVC())
-        stack.append(KeyEditVC(focusing: .slackUserToken))
-        nav.setViewControllers(stack, animated: true)
+        navigationController?.pushViewController(KeyEditVC(focusing: .slackUserToken), animated: true)
     }
 
     // MARK: Twitter
@@ -381,20 +365,12 @@ final class IntegrationsVC: UIViewController {
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Edit Keys", style: .default) { [weak self] _ in
-                guard let nav = self?.navigationController else { return }
-                var stack = nav.viewControllers
-                stack.append(KeysVC())
-                stack.append(KeyEditVC(focusing: .xAPIKey))
-                nav.setViewControllers(stack, animated: true)
+                self?.navigationController?.pushViewController(KeyEditVC(focusing: .xAPIKey), animated: true)
             })
             alert.addAction(UIAlertAction(title: "Done", style: .cancel))
             present(alert, animated: true)
         } else {
-            guard let nav = navigationController else { return }
-            var stack = nav.viewControllers
-            stack.append(KeysVC())
-            stack.append(KeyEditVC(focusing: .xAPIKey))
-            nav.setViewControllers(stack, animated: true)
+            navigationController?.pushViewController(KeyEditVC(focusing: .xAPIKey), animated: true)
         }
     }
 
@@ -448,11 +424,7 @@ final class IntegrationsVC: UIViewController {
     }
 
     private func pushGoogleWorkspaceKeyEditor(_ key: KeyStore.Key) {
-        guard let nav = navigationController else { return }
-        var stack = nav.viewControllers
-        stack.append(KeysVC())
-        stack.append(KeyEditVC(focusing: key))
-        nav.setViewControllers(stack, animated: true)
+        navigationController?.pushViewController(KeyEditVC(focusing: key), animated: true)
     }
 
     // MARK: - Apple Health

@@ -79,6 +79,12 @@ final class SSHConfigStore {
     private static let legacyKeyAccount = "loop.ssh.privateKey"
     private static let legacyPassAccount = "loop.ssh.passphrase"
 
+    /// Gate for the one-shot seed from build-time `Secrets.xcconfig` values
+    /// (surfaced via Info.plist `$(SSH_*)` substitution). Set only after a seed
+    /// actually lands, so the user's later edits/deletes aren't re-clobbered —
+    /// but a fresh checkout that adds the xcconfig keys still seeds on next run.
+    private static let seededFromInfoPlistFlag = "loop.ssh.seededFromInfoPlist.v1"
+
     private let defaults = UserDefaults.standard
 
     /// Saved connections, in user-defined display order.
@@ -252,6 +258,25 @@ final class SSHConfigStore {
             return
         }
         migrateLegacyIfPresent()
+        // No stored or legacy connections: fall back to a connection baked in
+        // at build time via Secrets.xcconfig (mirrors KeyStore's Info.plist
+        // fallback for API keys).
+        if connections.isEmpty {
+            seedFromInfoPlistIfNeeded()
+        }
+    }
+
+    /// One-time seed of a connection from the build-time `Secrets.xcconfig`
+    /// values (Info.plist `$(SSH_*)`). Only runs when nothing else is stored,
+    /// and only marks itself done once a config actually lands — so adding the
+    /// xcconfig keys to an existing install still takes effect on the next run.
+    private func seedFromInfoPlistIfNeeded() {
+        guard !defaults.bool(forKey: Self.seededFromInfoPlistFlag) else { return }
+        guard let seed = Self.infoPlistConfig() else { return }
+        connections = [seed]
+        save()
+        defaults.set(true, forKey: Self.seededFromInfoPlistFlag)
+        Self.log.info("Seeded SSH connection from Secrets.xcconfig host=\(seed.host, privacy: .public) user=\(seed.username, privacy: .public)")
     }
 
     private func save() {
@@ -306,6 +331,50 @@ final class SSHConfigStore {
         defaults.removeObject(forKey: Self.legacyUsernameKey)
         deleteKeychain(account: Self.legacyKeyAccount)
         deleteKeychain(account: Self.legacyPassAccount)
+    }
+
+    // MARK: - Build-time config (Secrets.xcconfig → Info.plist)
+
+    /// A non-empty Info.plist string, treating an unexpanded `$(VAR)`
+    /// placeholder (the xcconfig key was left blank) as missing — same rule
+    /// KeyStore uses for API keys.
+    private static func infoPlistString(_ key: String) -> String? {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: key) as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.hasPrefix("$(") { return nil }
+        return trimmed
+    }
+
+    /// Builds a connection from the `SSH_*` build-time values, or nil when the
+    /// minimum (host + username) isn't present. Port defaults to 22; the name
+    /// falls back to the host.
+    private static func infoPlistConfig() -> SSHConfig? {
+        guard let host = infoPlistString("SSH_HOST"),
+              let username = infoPlistString("SSH_USERNAME") else { return nil }
+        let port = infoPlistString("SSH_PORT").flatMap { Int($0) } ?? 22
+        let name = infoPlistString("SSH_NAME") ?? host
+        let privateKey = infoPlistString("SSH_PRIVATE_KEY_B64").flatMap(decodeBase64Key) ?? ""
+        let passphrase = infoPlistString("SSH_PASSPHRASE") ?? ""
+        return SSHConfig(
+            name: name, host: host, port: port, username: username,
+            privateKey: privateKey, passphrase: passphrase)
+    }
+
+    /// Decodes a base64-encoded private key. Accepts both standard base64 and
+    /// base64url (`-`/`_`), so the value can be encoded with `base64 | tr '+/'
+    /// '-_'` to avoid xcconfig truncating it at a `//` (which it reads as a
+    /// comment). Tolerates embedded whitespace and missing padding.
+    private static func decodeBase64Key(_ raw: String) -> String? {
+        var b64 = raw
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+            .components(separatedBy: .whitespacesAndNewlines).joined()
+        guard !b64.isEmpty else { return nil }
+        let remainder = b64.count % 4
+        if remainder > 0 { b64 += String(repeating: "=", count: 4 - remainder) }
+        guard let data = Data(base64Encoded: b64),
+              let key = String(data: data, encoding: .utf8) else { return nil }
+        return key
     }
 
     private static func keyAccount(_ id: UUID) -> String { "loop.ssh.key.\(id.uuidString)" }

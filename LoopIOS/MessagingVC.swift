@@ -276,8 +276,12 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     /// the same iCloud-KVS key. The setter rebuilds the speaker menu so
     /// the voice submenu updates to the new provider's voice list.
     private var ttsProvider: TTSProvider {
-        get { TTSProviderStore.current }
+        // Managed builds lock TTS to ElevenLabs Flash v2.5 — the speaker menu
+        // drops the model picker and every read/write here is pinned, so no
+        // code path can switch providers.
+        get { AppFlags.isManaged ? .elevenLabsFlashV25 : TTSProviderStore.current }
         set {
+            guard !AppFlags.isManaged else { return }
             TTSProviderStore.current = newValue
             muteButton?.menu = buildSpeakerMenu()
         }
@@ -2329,7 +2333,11 @@ extension MessagingVC: MessageBoxDelegate {
         // Onboarding messages are scripted UI, not assistant speech. Speaking
         // them would be jarring (and TTS isn't even configured yet at this
         // point in the flow). Drop the avatar back to idle and return early.
-        if message.onboardingCard != nil {
+        //
+        // Exception: managed onboarding deliberately reads its messages aloud
+        // (after a voice is picked) so the chosen voice demos itself. The
+        // `isMuted` check below keeps the pre-pick voice prompt silent.
+        if message.onboardingCard != nil && !AppFlags.isManaged {
             VoiceLoopCoordinator.shared.setState(.idle)
             return
         }
@@ -2715,6 +2723,15 @@ extension MessagingVC {
     /// tracks the currently selected backend (and any added/renamed backends).
     func updateBackendIndicator() {
         guard let button = backendIndicatorButton else { return }
+        // Managed builds (LOOP_FLAG set) pin the backend: show "Managed" and
+        // drop the picker so it can't be tapped/switched.
+        if AppFlags.isManaged {
+            button.setTitle(AppFlags.managedLabel, for: .normal)
+            button.menu = nil
+            button.showsMenuAsPrimaryAction = false
+            button.isUserInteractionEnabled = false
+            return
+        }
         button.setTitle(ExecutionBackendStore.shared.selectedBackend.displayName, for: .normal)
         button.menu = buildBackendMenu()
     }
@@ -2810,10 +2827,17 @@ extension MessagingVC {
         // hardcoded curated list per voiceOptions.
         let voiceMenu = buildVoiceMenu(for: activeProvider)
 
-        // When muted, hide everything below the toggle — they aren't doing anything.
-        let children: [UIMenuElement] = isMuted
-            ? [muteAction]
-            : [muteAction, speedMenu, providerMenu, voiceMenu]
+        // When muted, hide everything below the toggle — they aren't doing
+        // anything. Managed builds drop the provider (model) picker; TTS is
+        // pinned to ElevenLabs Flash v2.5.
+        let children: [UIMenuElement]
+        if isMuted {
+            children = [muteAction]
+        } else if AppFlags.isManaged {
+            children = [muteAction, speedMenu, voiceMenu]
+        } else {
+            children = [muteAction, speedMenu, providerMenu, voiceMenu]
+        }
         return UIMenu(title: "", children: children)
     }
 
@@ -4806,6 +4830,13 @@ extension MessagingVC: OnboardingCoordinatorHost, OnboardingCardDelegate {
             sendHapticGenerator.impactOccurred()
         } else if message.role == "assistant" {
             responseHapticGenerator.impactOccurred()
+            // Managed onboarding reads its assistant messages aloud so the
+            // chosen voice demos itself. The voice-picker prompt (message 1)
+            // stays silent because audio is muted until a voice is selected;
+            // `playMessageSynthesizer` early-returns while muted.
+            if AppFlags.isManaged {
+                playMessageSynthesizer(message: message)
+            }
         }
         DispatchQueue.main.async { [weak self] in
             self?.scrollOnboardingToBottom()

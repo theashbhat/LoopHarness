@@ -867,16 +867,25 @@ class MessagingCell: UITableViewCell {
             animatingtextView.textContainer.widthTracksTextView = true
             
             
-            textView.attributedText = self.attributedString(from: data.content)
+            // Render the markdown once and share it between the base text view
+            // and the animating overlay.
+            let full = self.attributedString(from: data.content)
+
+            // IMPORTANT: set `font`/`textColor` BEFORE assigning `attributedText`.
+            // On a UITextView these setters apply uniformly to the *existing*
+            // text, so setting them AFTER `attributedText` strips the per-range
+            // bold/link styling the markdown renderer produced. That left the
+            // base `textView` rendering in plain body weight while the overlay
+            // kept its bold — so the two wrapped differently and, with both
+            // visible, drew the text twice at mismatched positions (the
+            // "garbled / doubled text" bug, worst around bold/heading/link runs).
             textView.textColor = .label
             textView.font = UIFont.preferredFont(forTextStyle: .body)
-            textView.alpha = 0.1
             textView.layer.borderWidth = 0
             textView.layer.borderColor = UIColor.clear.cgColor
-            
-            animatingtextView.alpha = 1
+            textView.attributedText = full
+
             animatingtextView.textColor = .label
-//            animatingtextView.text = data.content
             animatingtextView.font = UIFont.preferredFont(forTextStyle: .body)
 
             let byline = modelText(for: data)
@@ -897,14 +906,18 @@ class MessagingCell: UITableViewCell {
             // which re-ran markdown regex per tick and relaid out the table —
             // this renders markdown once, fixes the height via `textView`, and
             // only modulates per-word alpha. See docs/streaming-investigation.md.
-            let full = self.attributedString(from: data.content)
             if shouldAnimate, !UIAccessibility.isReduceMotionEnabled {
+                // Base layer is the invisible height anchor; the overlay fades
+                // the words in (startTypeOnReveal sets textView.alpha = 0).
                 startTypeOnReveal(full: full)
             } else {
+                // No animation: render through the single base text view and
+                // keep the overlay fully hidden. Showing both at once draws the
+                // same text twice, which garbles whenever their wrapping diverges.
                 stopTypeOnReveal()
                 textView.alpha = 1.0
-                animatingtextView.alpha = 1
-                animatingtextView.attributedText = full
+                animatingtextView.alpha = 0
+                animatingtextView.attributedText = nil
             }
             
             // Update content size after setting text

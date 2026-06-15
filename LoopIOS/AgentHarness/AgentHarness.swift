@@ -178,6 +178,7 @@ final class AgentHarness {
             GoogleDriveSkill.systemPromptFragment,
             GoogleGmailSkill.systemPromptFragment,
             GoogleCalendarSkill.systemPromptFragment,
+            AgentMailSkill.systemPromptFragment,
         ]
         #if canImport(HealthKit) && os(iOS)
         fragments.append(HealthSkill.systemPromptFragment)
