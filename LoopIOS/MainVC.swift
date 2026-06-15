@@ -108,23 +108,34 @@ class MainVC: MessagingVC {
         vc.didMove(toParent: self)
         agentLargeVC = vc
 
-        // Fade the chrome in while the pop flies.
+        // Fade the backdrop in quickly for continuity, but hold the chrome
+        // (labels, pill, ticker) back — it should arrive WITH the orb, not
+        // before it. Without this the chrome lands at full opacity in ~0.35s
+        // while the orb is still flying up over 0.65s, so the labels read as
+        // "showing up early."
         vc.view.alpha = 0
+        vc.agentView.setChromeHidden(true, animated: false)
         vc.view.layoutIfNeeded()
-        UIView.animate(withDuration: 0.35) { vc.view.alpha = 1 }
+        UIView.animate(withDuration: 0.3) { vc.view.alpha = 1 }
 
         // Fly the orb from the nav-bar avatar to the hero position.
         if let source = avatar,
            let window = view.window {
             let dest = vc.agentView.avatar
-            AvatarPopAnimator.play(from: source, to: dest, in: window, duration: 0.65) {
+            AvatarPopAnimator.play(from: source, to: dest, in: window, duration: 0.65) { [weak vc] in
                 // Leave the nav-bar orb hidden for the lifetime of the large
                 // view. Unhiding it here made it flash back the instant the
                 // hero finished flying in (the nav bar is hidden, but the
                 // titleView orb still re-rendered). It's restored on dismiss —
                 // the reverse pop unhides it on a tap, the pan path below does.
                 dest.isHidden = false
+                // Orb has landed — now bring the chrome in.
+                vc?.agentView.setChromeHidden(false, animated: true)
             }
+        } else {
+            // No window to fly the orb in — just reveal the chrome immediately
+            // so it isn't stuck hidden.
+            vc.agentView.setChromeHidden(false, animated: false)
         }
 
         navigationController?.setNavigationBarHidden(true, animated: true)
@@ -159,8 +170,10 @@ class MainVC: MessagingVC {
             animations: {
                 vc.view.alpha = 0
                 if panDismiss {
-                    let currentY = vc.view.transform.ty
-                    vc.view.transform = CGAffineTransform(translationX: 0, y: max(currentY, 200))
+                    // The drag slides `agentView` (the pinned content subview),
+                    // not the root view — so continue the slide from there.
+                    let currentY = vc.agentView.transform.ty
+                    vc.agentView.transform = CGAffineTransform(translationX: 0, y: max(currentY, 200))
                 }
             },
             completion: { [weak self] _ in
@@ -170,6 +183,17 @@ class MainVC: MessagingVC {
                 self?.agentLargeVC = nil
             }
         )
+    }
+
+    /// A notification tap must land on the chat even if the large agent orb is
+    /// covering it — tear it down (no fly-back animation; the user is jumping
+    /// straight to a conversation, not casually dismissing the orb) before the
+    /// base class pops/dismisses to surface the chat.
+    override func bringChatToFront() {
+        if agentLargeVC != nil {
+            dismissAgentLargeView()
+        }
+        super.bringChatToFront()
     }
 
     /// Hero avatar that fills the empty-state slot above the message box.
@@ -238,6 +262,28 @@ class MainVC: MessagingVC {
             self?.avatar?.pulse()
             self?.heroAvatar?.pulse()
         }
+    }
+
+    /// Primary catch-all: fires whenever the message set is rebuilt from
+    /// scratch, including the cold-start restore that populates `messages`
+    /// from storage long after `viewDidLoad` ran (the "hero floating over
+    /// text on cold start" bug — that path never hit an explicit refresh
+    /// site). Snaps rather than pops, since these are state restorations, not
+    /// live interactions; the deliberate 3D pop stays reserved for send / open
+    /// / new-chat, which call `refreshAvatarVisibility()` with animation.
+    override func messagesDidReload() {
+        super.messagesDidReload()
+        refreshAvatarVisibility(animated: false)
+    }
+
+    /// Belt-and-suspenders: keep the avatar in sync across re-layouts driven
+    /// by rotation, keyboard, or bounds changes. `refreshAvatarVisibility` is
+    /// idempotent, so the steady-state cost is one `visible_messages.isEmpty`
+    /// check. (This does NOT fire on a bare `tableView.reloadData()`, which is
+    /// why `messagesDidReload` above is the real fix for the cold-start case.)
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        refreshAvatarVisibility(animated: false)
     }
 
     private func setHeroVisible(_ visible: Bool, animated: Bool = true) {
@@ -321,10 +367,20 @@ class MainVC: MessagingVC {
     private func refreshAvatarVisibility(animated: Bool = true) {
         let isEmpty = self.visible_messages.isEmpty
         let previous = lastVisibilityEmpty
-        lastVisibilityEmpty = isEmpty
 
         let isInitial = (previous == nil)
         let changed = previous != isEmpty
+
+        // Idempotent: bail out when the empty/non-empty state hasn't moved.
+        // This makes the method cheap and safe to call on every layout pass
+        // (see viewDidLayoutSubviews), which is what guarantees the hero never
+        // lingers over a populated chat regardless of which path appended the
+        // messages — launch restore, a background VM/runner turn, a remote
+        // poll, etc. None of those route through an explicit refresh site.
+        guard isInitial || changed else { return }
+
+        lastVisibilityEmpty = isEmpty
+
         let canPop = animated
             && changed
             && !isInitial

@@ -511,6 +511,7 @@ class MessagingCell: UITableViewCell {
 
         // Reset the swipe-to-reveal slide so a recycled cell doesn't carry over
         // a mid-swipe offset, and clear the stale time text.
+        timeRevealOffset = 0
         contentView.transform = .identity
         timeLabel.text = nil
 
@@ -866,16 +867,25 @@ class MessagingCell: UITableViewCell {
             animatingtextView.textContainer.widthTracksTextView = true
             
             
-            textView.attributedText = self.attributedString(from: data.content)
+            // Render the markdown once and share it between the base text view
+            // and the animating overlay.
+            let full = self.attributedString(from: data.content)
+
+            // IMPORTANT: set `font`/`textColor` BEFORE assigning `attributedText`.
+            // On a UITextView these setters apply uniformly to the *existing*
+            // text, so setting them AFTER `attributedText` strips the per-range
+            // bold/link styling the markdown renderer produced. That left the
+            // base `textView` rendering in plain body weight while the overlay
+            // kept its bold — so the two wrapped differently and, with both
+            // visible, drew the text twice at mismatched positions (the
+            // "garbled / doubled text" bug, worst around bold/heading/link runs).
             textView.textColor = .label
             textView.font = UIFont.preferredFont(forTextStyle: .body)
-            textView.alpha = 0.1
             textView.layer.borderWidth = 0
             textView.layer.borderColor = UIColor.clear.cgColor
-            
-            animatingtextView.alpha = 1
+            textView.attributedText = full
+
             animatingtextView.textColor = .label
-//            animatingtextView.text = data.content
             animatingtextView.font = UIFont.preferredFont(forTextStyle: .body)
 
             let byline = modelText(for: data)
@@ -896,14 +906,18 @@ class MessagingCell: UITableViewCell {
             // which re-ran markdown regex per tick and relaid out the table —
             // this renders markdown once, fixes the height via `textView`, and
             // only modulates per-word alpha. See docs/streaming-investigation.md.
-            let full = self.attributedString(from: data.content)
             if shouldAnimate, !UIAccessibility.isReduceMotionEnabled {
+                // Base layer is the invisible height anchor; the overlay fades
+                // the words in (startTypeOnReveal sets textView.alpha = 0).
                 startTypeOnReveal(full: full)
             } else {
+                // No animation: render through the single base text view and
+                // keep the overlay fully hidden. Showing both at once draws the
+                // same text twice, which garbles whenever their wrapping diverges.
                 stopTypeOnReveal()
                 textView.alpha = 1.0
-                animatingtextView.alpha = 1
-                animatingtextView.attributedText = full
+                animatingtextView.alpha = 0
+                animatingtextView.attributedText = nil
             }
             
             // Update content size after setting text
@@ -1066,12 +1080,27 @@ class MessagingCell: UITableViewCell {
             : Self.dayTimeFormatter.string(from: date)
     }
 
+    /// Current swipe-reveal slide offset, retained so `layoutSubviews` can
+    /// re-assert the transform. `UITableViewCell.layoutSubviews` sets
+    /// `contentView.frame = bounds`, which cancels a translation transform's
+    /// visible offset — and the nav-orb's display-link animation invalidates
+    /// the view tree every frame, so that reset fires continuously during a
+    /// drag. The net effect was the slide only appearing on release (when the
+    /// explicit spring animation took over). Re-applying after every layout
+    /// keeps the live drag visible.
+    private var timeRevealOffset: CGFloat = 0
+
     /// Slides the whole row left by `offset` points to reveal the timestamp.
     /// Driven by MessagingVC's pan so every visible cell moves in lock-step.
     func setTimeRevealOffset(_ offset: CGFloat) {
-        contentView.transform = offset == 0
+        timeRevealOffset = offset
+        applyTimeRevealTransform()
+    }
+
+    private func applyTimeRevealTransform() {
+        contentView.transform = timeRevealOffset == 0
             ? .identity
-            : CGAffineTransform(translationX: -offset, y: 0)
+            : CGAffineTransform(translationX: -timeRevealOffset, y: 0)
     }
     
     func attributedString(from text: String) -> NSAttributedString {
@@ -2274,7 +2303,23 @@ class MessagingCell: UITableViewCell {
     }
 
     override func layoutSubviews() {
+        // While a swipe-reveal slide is active, clear the transform BEFORE
+        // super lays out. `UITableViewCell.layoutSubviews` sets
+        // `contentView.frame = bounds`; if the transform is non-identity at
+        // that moment, UIKit shifts the layer's center to compensate, leaving
+        // the transform property set but the visible offset cancelled (which
+        // is why the slide only appeared on release, when the explicit
+        // animation took over). Laying out with an identity transform keeps
+        // the frame clean, then we re-apply the slide on top of it. Only do
+        // this mid-slide so the release spring animation (offset == 0) runs
+        // untouched.
+        if timeRevealOffset != 0 {
+            contentView.transform = .identity
+        }
         super.layoutSubviews()
+        if timeRevealOffset != 0 {
+            applyTimeRevealTransform()
+        }
         // CALayer frames aren't driven by Auto Layout — keep the story card's
         // gradient sized to the card whenever the card is on screen.
         if !storyCardView.isHidden {

@@ -163,6 +163,12 @@ struct ToolRouter {
         ], toolNames: [
             "muni_arrivals",
         ]),
+        SkillGroup(name: "email", keywords: [
+            "email", "e-mail", "mail", "send it to", "send this to",
+            "inbox", "gmail", "agentmail", "send me",
+        ], toolNames: [
+            "agent_mail", "google_gmail",
+        ]),
     ]
 
     /// Tools always included regardless of message content. These are needed

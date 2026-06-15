@@ -48,6 +48,8 @@ final class KeyStore {
         case googleWorkspaceRefreshToken = "GOOGLE_WORKSPACE_REFRESH_TOKEN"
         case googleWorkspaceClientId     = "GOOGLE_WORKSPACE_CLIENT_ID"
         case googleWorkspaceClientSecret = "GOOGLE_WORKSPACE_CLIENT_SECRET"
+        case agentMail                   = "AGENT_MAIL_API_KEY"
+        case agentMailInbox              = "AGENT_MAIL_INBOX"
 
         /// User-facing label shown in Settings.
         var displayName: String {
@@ -77,6 +79,8 @@ final class KeyStore {
             case .googleWorkspaceRefreshToken: return "Google Workspace Refresh Token"
             case .googleWorkspaceClientId:     return "Google Workspace Client ID"
             case .googleWorkspaceClientSecret: return "Google Workspace Client Secret"
+            case .agentMail:                   return "AgentMail API Key"
+            case .agentMailInbox:              return "AgentMail Inbox"
             }
         }
 
@@ -108,6 +112,8 @@ final class KeyStore {
             case .googleWorkspaceRefreshToken: return "Optional. OAuth2 refresh token — lets the app request a new access token when the current one expires"
             case .googleWorkspaceClientId:     return "Optional. OAuth2 client id from Google Cloud Console — needed for token refresh"
             case .googleWorkspaceClientSecret: return "Optional. OAuth2 client secret from Google Cloud Console — needed for token refresh"
+            case .agentMail:                   return "am_… key from agentmail.to · lets Loop read its inbox and send email (with attachments) on your behalf"
+            case .agentMailInbox:              return "Optional. The inbox to send from, e.g. loop_email@agentmail.to. Leave blank and Loop will reuse your first inbox or create one automatically."
             }
         }
     }
@@ -124,6 +130,7 @@ final class KeyStore {
         case twitter
         case sfBayTransit
         case googleWorkspace
+        case agentMail
 
         /// Row title in the list + window title in the editor.
         var displayName: String {
@@ -143,6 +150,7 @@ final class KeyStore {
             case .twitter:    return "X (Twitter)"
             case .sfBayTransit: return "511 SF Bay"
             case .googleWorkspace: return "Google Workspace"
+            case .agentMail:    return "AgentMail"
             }
         }
 
@@ -167,6 +175,7 @@ final class KeyStore {
             case .twitter:    return "Post tweets to X (Twitter) with OAuth 1.0a"
             case .sfBayTransit: return "Real-time SF Muni bus/train arrival predictions via the 511 API"
             case .googleWorkspace: return "Google Drive, Gmail, and Calendar via OAuth2 access token"
+            case .agentMail:    return "Read Loop's email inbox and send email (with attachments) via agentmail.to"
             }
         }
 
@@ -192,6 +201,7 @@ final class KeyStore {
             case .twitter:    return [.xAPIKey, .xAPISecret, .xAccessToken, .xAccessTokenSecret]
             case .sfBayTransit: return [.sfBayTransit]
             case .googleWorkspace: return [.googleWorkspaceAccessToken, .googleWorkspaceRefreshToken, .googleWorkspaceClientId, .googleWorkspaceClientSecret]
+            case .agentMail:    return [.agentMail, .agentMailInbox]
             }
         }
 
@@ -313,7 +323,7 @@ final class KeyStore {
         // hide and the URL is the whole point. Same for the Devin org id,
         // which is a `org-…` identifier (not a secret) the user needs to be
         // able to read back when verifying their setup.
-        if key == .obsidianBaseURL || key == .obsidianVaultName || key == .githubBaseURL || key == .devinOrgID {
+        if key == .obsidianBaseURL || key == .obsidianVaultName || key == .githubBaseURL || key == .devinOrgID || key == .agentMailInbox {
             return raw
         }
         let suffixLen = 4

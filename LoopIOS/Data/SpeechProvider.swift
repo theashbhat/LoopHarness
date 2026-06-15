@@ -149,7 +149,7 @@ enum TTSProvider: String, CaseIterable {
         switch self {
         case .aura2:              return "aura-2-thalia-en"
         case .elevenLabsV3:       return "21m00Tcm4TlvDq8ikWAM"
-        case .elevenLabsFlashV25: return "21m00Tcm4TlvDq8ikWAM"
+        case .elevenLabsFlashV25: return "ZSNL4hPqCnqoMPaI4jGX" // Hannah (american female)
         case .openAIMiniTTS:      return "shimmer"
         case .system:             return ""
         }
@@ -167,8 +167,8 @@ enum TTSProviderStore {
 
     static var current: TTSProvider {
         get {
-            let raw = iCloudKVSDefaults.shared.string(forKey: defaultsKey) ?? TTSProvider.openAIMiniTTS.rawValue
-            return TTSProvider(rawValue: raw) ?? .openAIMiniTTS
+            let raw = iCloudKVSDefaults.shared.string(forKey: defaultsKey) ?? TTSProvider.elevenLabsFlashV25.rawValue
+            return TTSProvider(rawValue: raw) ?? .elevenLabsFlashV25
         }
         set {
             iCloudKVSDefaults.shared.set(newValue.rawValue, forKey: defaultsKey)

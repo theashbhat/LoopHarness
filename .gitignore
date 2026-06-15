@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 Secrets.xcconfig
+Secrets_managed.xcconfig
 *.secrets.xcconfig
 *.p12
 *.mobileprovision
