@@ -1761,7 +1761,7 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                 stack.addArrangedSubview(gridView)
                 gridView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             case .codeBlock(let block):
-                let codeView = makeCodeBlockView(block)
+                let codeView = makeCodeBlockView(block, maxWidth: maxWidth)
                 stack.addArrangedSubview(codeView)
                 codeView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             }
@@ -1771,7 +1771,7 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
 
     /// Builds a rounded container with monospaced code text, a subtle
     /// background, and an optional language label in the top-right corner.
-    private func makeCodeBlockView(_ block: MarkdownCodeBlock) -> NSView {
+    private func makeCodeBlockView(_ block: MarkdownCodeBlock, maxWidth: CGFloat) -> NSView {
         let container = AdaptiveTableLayerView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.adaptiveCornerRadius = 8
@@ -1779,9 +1779,12 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         container.adaptiveBorder = nil
         container.adaptiveBorderWidth = 0
 
+        // Wrap code at the bubble width (minus the 12pt inset on each side)
+        // so long lines reflow instead of being clipped off the right edge.
+        let inset: CGFloat = 12
         let codeFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let tv = ChatLinkTextView.makeBubbleTextView(maxTextWidth: .greatestFiniteMagnitude)
-        tv.textContainerInset = NSSize(width: 12, height: 12)
+        let tv = ChatLinkTextView.makeBubbleTextView(maxTextWidth: max(0, maxWidth - inset * 2))
+        tv.textContainerInset = NSSize(width: inset, height: inset)
         tv.textStorage?.setAttributedString(
             CodeSyntaxHighlighter.highlight(block.code, language: block.language, font: codeFont)
         )
