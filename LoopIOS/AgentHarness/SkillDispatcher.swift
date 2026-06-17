@@ -150,6 +150,9 @@ final class SkillDispatcher {
         if MuniRealtimeSkill.shared.handles(functionName: call.name) {
             MuniRealtimeSkill.shared.handle(functionCall: call, completion: completion); return
         }
+        if CardSkill.shared.handles(functionName: call.name) {
+            CardSkill.shared.handle(functionCall: call, completion: completion); return
+        }
         if GoogleDriveSkill.shared.handles(functionName: call.name) {
             GoogleDriveSkill.shared.handle(functionCall: call, completion: completion); return
         }

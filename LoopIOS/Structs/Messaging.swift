@@ -607,6 +607,7 @@ var tools: [[String: Any]] = {
     all += TwitterSkill.tools
     all += SSHSkill.tools
     all += MuniRealtimeSkill.tools
+    all += CardSkill.tools
     all += GoogleDriveSkill.tools
     all += GoogleGmailSkill.tools
     all += GoogleCalendarSkill.tools

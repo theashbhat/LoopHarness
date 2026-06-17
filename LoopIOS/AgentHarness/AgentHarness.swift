@@ -133,6 +133,7 @@ final class AgentHarness {
             ("Google Drive",     "Search, read, and create files in Google Drive", GoogleDriveSkill.tools),
             ("Google Gmail",     "Search, read, and send emails via Gmail", GoogleGmailSkill.tools),
             ("Google Calendar",  "List and create events on Google Calendar (REST API)", GoogleCalendarSkill.tools),
+            ("Feed Cards",       "Generate visual feed cards (image or markdown poster)", CardSkill.tools),
         ]
         #if canImport(HealthKit) && os(iOS)
         catalog.append(("Apple Health", "Read-only access to steps, distance, workouts, heart rate, sleep, body mass", HealthSkill.tools))
@@ -179,6 +180,7 @@ final class AgentHarness {
             GoogleGmailSkill.systemPromptFragment,
             GoogleCalendarSkill.systemPromptFragment,
             AgentMailSkill.systemPromptFragment,
+            CardSkill.systemPromptFragment,
         ]
         #if canImport(HealthKit) && os(iOS)
         fragments.append(HealthSkill.systemPromptFragment)

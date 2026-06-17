@@ -169,6 +169,12 @@ struct ToolRouter {
         ], toolNames: [
             "agent_mail", "google_gmail",
         ]),
+        SkillGroup(name: "card", keywords: [
+            "card", "feed", "generate a card", "summary card",
+            "recap", "visual card", "poster",
+        ], toolNames: [
+            "generate_card",
+        ]),
     ]
 
     /// Tools always included regardless of message content. These are needed
