@@ -209,36 +209,53 @@ private struct FileAttachmentBubble: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: iconName)
-                .font(.title2)
-                .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(attachment.fileName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(2)
-                Text(subtitle)
-                    .font(.caption)
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: iconName)
+                    .font(.title2)
                     .foregroundStyle(.secondary)
-                if let snippet = snippetPreview, !snippet.isEmpty {
-                    Text(snippet)
-                        .font(.caption2)
+                    .frame(width: 32, height: 32)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(attachment.fileName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(2)
+                    Text(subtitle)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .padding(.top, 2)
+                    if let snippet = snippetPreview, !snippet.isEmpty {
+                        Text(snippet)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .padding(.top, 2)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .contentShape(Rectangle())
+            .onTapGesture { open() }
+
+            if hasTextContent {
+                Divider()
+                HStack {
+                    Spacer()
+                    ShareLink(item: shareText) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
                 }
             }
-            Spacer(minLength: 0)
         }
-        .padding(14)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
         )
-        .contentShape(Rectangle())
-        .onTapGesture { open() }
     }
 
     private var iconName: String {
@@ -274,6 +291,17 @@ private struct FileAttachmentBubble: View {
         default:
             return nil
         }
+    }
+
+    private var hasTextContent: Bool {
+        switch attachment.kind {
+        case .markdown, .text: return true
+        default: return false
+        }
+    }
+
+    private var shareText: String {
+        (try? String(contentsOf: attachment.fileURL, encoding: .utf8)) ?? ""
     }
 
     private func open() {

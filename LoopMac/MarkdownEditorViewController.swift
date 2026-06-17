@@ -44,6 +44,7 @@ final class MarkdownEditorViewController: NSViewController {
     private let textView = NSTextView()
     private let spinner = NSProgressIndicator()
     private let errorLabel = NSTextField(labelWithString: "")
+    private let shareToolbar = MacMarkdownShareToolbar()
 
     // MARK: - Init
 
@@ -88,6 +89,12 @@ final class MarkdownEditorViewController: NSViewController {
         errorLabel.isHidden = true
         root.addSubview(errorLabel)
 
+        shareToolbar.translatesAutoresizingMaskIntoConstraints = false
+        shareToolbar.onShare = { [weak self] in
+            self?.shareMarkdownText()
+        }
+        root.addSubview(shareToolbar)
+
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: root.topAnchor),
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -97,7 +104,11 @@ final class MarkdownEditorViewController: NSViewController {
             scrollView.topAnchor.constraint(equalTo: header.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: shareToolbar.topAnchor),
+
+            shareToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            shareToolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            shareToolbar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
 
             spinner.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: root.centerYAnchor),
@@ -312,6 +323,15 @@ final class MarkdownEditorViewController: NSViewController {
 
     private func updateSaveButton() {
         saveButton.isEnabled = isDirty
+    }
+
+    private func shareMarkdownText() {
+        guard isLoaded else { return }
+        let text = textView.string
+        let picker = NSSharingServicePicker(items: [text])
+        picker.show(relativeTo: shareToolbar.shareButtonBounds,
+                    of: shareToolbar.shareButtonView,
+                    preferredEdge: .minY)
     }
 }
 
