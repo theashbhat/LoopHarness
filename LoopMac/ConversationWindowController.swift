@@ -1477,6 +1477,12 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             }
             NSWorkspace.shared.open(url)
         }
+        card.onShare = { url in
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            let picker = NSSharingServicePicker(items: [text])
+            picker.show(relativeTo: card.bounds, of: card, preferredEdge: .minY)
+        }
         bubble.addSubview(card)
 
         let cardWidth: CGFloat = 240
@@ -2376,6 +2382,7 @@ final class ClickableImageView: NSImageView {
 final class MacFilePreviewCardView: NSView {
 
     var onClick: ((URL) -> Void)?
+    var onShare: ((URL) -> Void)?
 
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
@@ -2383,6 +2390,22 @@ final class MacFilePreviewCardView: NSView {
     private let badgeContainer = NSView()
     private let subtitleLabel = NSTextField(labelWithString: "")
     private let snippetView = NSTextView()
+    private let shareRow = NSView()
+    private let shareRowSeparator = NSBox()
+    private let shareButton: NSButton = {
+        let b = NSButton()
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.bezelStyle = .recessed
+        b.isBordered = false
+        b.image = NSImage(systemSymbolName: "square.and.arrow.up",
+                          accessibilityDescription: "Share")
+        b.imagePosition = .imageOnly
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        b.contentTintColor = .secondaryLabelColor
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        return b
+    }()
+    private lazy var shareRowCollapsed: NSLayoutConstraint = shareRow.heightAnchor.constraint(equalToConstant: 0)
     private var fileURL: URL?
 
     init() {
@@ -2449,11 +2472,36 @@ final class MacFilePreviewCardView: NSView {
         snippetView.textContainer?.maximumNumberOfLines = 8
         snippetView.textContainer?.lineBreakMode = .byTruncatingTail
 
+        // Share row — separator + button, hidden by default.
+        shareRow.translatesAutoresizingMaskIntoConstraints = false
+        shareRow.isHidden = true
+
+        shareRowSeparator.translatesAutoresizingMaskIntoConstraints = false
+        shareRowSeparator.boxType = .separator
+        shareRow.addSubview(shareRowSeparator)
+
+        shareButton.target = self
+        shareButton.action = #selector(handleShareTap)
+        shareRow.addSubview(shareButton)
+
+        NSLayoutConstraint.activate([
+            shareRowSeparator.topAnchor.constraint(equalTo: shareRow.topAnchor),
+            shareRowSeparator.leadingAnchor.constraint(equalTo: shareRow.leadingAnchor),
+            shareRowSeparator.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor),
+
+            shareButton.topAnchor.constraint(equalTo: shareRowSeparator.bottomAnchor, constant: 2),
+            shareButton.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor, constant: -4),
+            shareButton.bottomAnchor.constraint(equalTo: shareRow.bottomAnchor, constant: -2),
+            shareButton.widthAnchor.constraint(equalToConstant: 24),
+            shareButton.heightAnchor.constraint(equalToConstant: 24),
+        ])
+
         addSubview(iconView)
         addSubview(titleLabel)
         addSubview(badgeContainer)
         addSubview(subtitleLabel)
         addSubview(snippetView)
+        addSubview(shareRow)
 
         NSLayoutConstraint.activate([
             iconView.widthAnchor.constraint(equalToConstant: 16),
@@ -2480,18 +2528,31 @@ final class MacFilePreviewCardView: NSView {
             snippetView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 8),
             snippetView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             snippetView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            snippetView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+
+            shareRow.topAnchor.constraint(equalTo: snippetView.bottomAnchor, constant: 8),
+            shareRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shareRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shareRow.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
         ])
 
-        // Two competing bottom constraints — the snippet drives the height
-        // when it's visible; otherwise the subtitle (chip-like generic
-        // card) pulls the bottom up. Priorities pick the right one.
+        shareRow.clipsToBounds = true
+        shareRowCollapsed.isActive = true
+
+        // Bottom priorities: share row > snippet > subtitle.
+        let shareRowBottom = bottomAnchor.constraint(equalTo: shareRow.bottomAnchor)
+        shareRowBottom.priority = NSLayoutConstraint.Priority(751)
+        shareRowBottom.isActive = true
         let bottomEqualSnippet = bottomAnchor.constraint(equalTo: snippetView.bottomAnchor, constant: 12)
         bottomEqualSnippet.priority = .defaultHigh
         bottomEqualSnippet.isActive = true
         let bottomEqualSubtitle = bottomAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12)
         bottomEqualSubtitle.priority = .defaultLow
         bottomEqualSubtitle.isActive = true
+    }
+
+    @objc private func handleShareTap() {
+        guard let url = fileURL else { return }
+        onShare?(url)
     }
 
     func configure(for attachment: FileAttachment) {
@@ -2512,6 +2573,8 @@ final class MacFilePreviewCardView: NSView {
             badgeContainer.isHidden = false
             subtitleLabel.stringValue = Self.subtitle("Markdown", size: sizeText)
             applyMarkdownSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .text:
             iconView.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil)
             if let lang = attachment.languageTag {
@@ -2523,6 +2586,8 @@ final class MacFilePreviewCardView: NSView {
                 subtitleLabel.stringValue = Self.subtitle("Text", size: sizeText)
             }
             applyCodeSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .generic:
             iconView.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
             badgeContainer.isHidden = true
@@ -2536,11 +2601,15 @@ final class MacFilePreviewCardView: NSView {
             subtitleLabel.stringValue = Self.subtitle(mimeLabel, size: sizeText)
             snippetView.string = ""
             snippetView.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         case .image, .pdf:
             iconView.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
             badgeContainer.isHidden = true
             subtitleLabel.stringValue = Self.subtitle(attachment.mimeType, size: sizeText)
             snippetView.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         }
     }
 

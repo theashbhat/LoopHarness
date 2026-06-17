@@ -431,6 +431,7 @@ class MessagingCell: UITableViewCell {
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.onTap = { [weak self] in self?.handleFilePreviewCardTap() }
+        v.onShare = { [weak self] in self?.handleFilePreviewCardShare() }
         return v
     }()
     private var filePreviewCardConstraints: [NSLayoutConstraint] = []
@@ -2758,6 +2759,18 @@ class MessagingCell: UITableViewCell {
         presentQuickLook(for: url)
     }
 
+    /// Share the raw text content of the previewed file.
+    private func handleFilePreviewCardShare() {
+        guard let url = currentAttachmentFileURL,
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8),
+              let presenter = parentViewController else { return }
+        let vc = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        vc.popoverPresentationController?.sourceView = filePreviewCard
+        vc.popoverPresentationController?.sourceRect = filePreviewCard.bounds
+        presenter.present(vc, animated: true)
+    }
+
     /// Render page 1 of a PDF as a UIImage sized to fit the bubble. Returns
     /// nil for malformed or empty PDFs — caller handles the placeholder.
     private static func renderPDFThumbnail(at url: URL, size: CGSize) -> UIImage? {
@@ -3035,6 +3048,10 @@ final class FilePreviewCardView: UIView {
     /// QuickLook).
     var onTap: (() -> Void)?
 
+    /// Invoked when the user taps the Share button on the card. The host
+    /// reads the full file content and presents the share sheet.
+    var onShare: (() -> Void)?
+
     /// Apply visual state for `attachment`. Call again with a new attachment
     /// to repurpose a recycled card; call `reset()` before the cell is
     /// re-rendered with a non-card attachment kind.
@@ -3058,6 +3075,8 @@ final class FilePreviewCardView: UIView {
             badgeLabel.isHidden = false
             subtitleLabel.text = Self.subtitle("Markdown", size: sizeText)
             applyMarkdownSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .text:
             iconView.image = UIImage(systemName: "chevron.left.forwardslash.chevron.right")
             iconView.tintColor = .secondaryLabel
@@ -3070,6 +3089,8 @@ final class FilePreviewCardView: UIView {
                 subtitleLabel.text = Self.subtitle("Text", size: sizeText)
             }
             applyCodeSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .generic:
             iconView.image = UIImage(systemName: "doc")
             iconView.tintColor = .secondaryLabel
@@ -3088,6 +3109,8 @@ final class FilePreviewCardView: UIView {
             snippetLabel.attributedText = nil
             snippetLabel.text = nil
             snippetLabel.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         case .image, .pdf:
             // Shouldn't happen — the cell never routes image/PDF through
             // this view — but render a sensible placeholder if it does.
@@ -3096,6 +3119,8 @@ final class FilePreviewCardView: UIView {
             badgeLabel.isHidden = true
             subtitleLabel.text = Self.subtitle(attachment.mimeType, size: sizeText)
             snippetLabel.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         }
     }
 
@@ -3111,6 +3136,8 @@ final class FilePreviewCardView: UIView {
         snippetLabel.text = nil
         snippetLabel.isHidden = false
         iconView.image = nil
+        shareRow.isHidden = true
+        shareRowCollapsed.isActive = true
     }
 
     // MARK: - Subviews
@@ -3121,6 +3148,20 @@ final class FilePreviewCardView: UIView {
     private let subtitleLabel = UILabel()
     private let snippetLabel = UILabel()
     private let headerStack = UIStackView()
+    private let shareRow = UIView()
+    private let shareRowSeparator = UIView()
+    private lazy var shareRowCollapsed: NSLayoutConstraint = shareRow.heightAnchor.constraint(equalToConstant: 0)
+    private let shareButton: UIButton = {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "square.and.arrow.up")
+        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 13, weight: .medium)
+        config.baseForegroundColor = .secondaryLabel
+        config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10)
+        let b = UIButton(configuration: config)
+        b.accessibilityLabel = "Share"
+        return b
+    }()
 
     // MARK: - Setup
 
@@ -3186,9 +3227,34 @@ final class FilePreviewCardView: UIView {
         headerStack.addArrangedSubview(titleLabel)
         headerStack.addArrangedSubview(badgeLabel)
 
+        // Share row — separator + button, hidden until configured for a
+        // text-based kind (markdown/source/text).
+        shareRow.translatesAutoresizingMaskIntoConstraints = false
+        shareRow.isHidden = true
+
+        shareRowSeparator.translatesAutoresizingMaskIntoConstraints = false
+        shareRowSeparator.backgroundColor = .separator
+        shareRow.addSubview(shareRowSeparator)
+
+        shareButton.translatesAutoresizingMaskIntoConstraints = false
+        shareButton.addTarget(self, action: #selector(handleShareTap), for: .touchUpInside)
+        shareRow.addSubview(shareButton)
+
+        NSLayoutConstraint.activate([
+            shareRowSeparator.topAnchor.constraint(equalTo: shareRow.topAnchor),
+            shareRowSeparator.leadingAnchor.constraint(equalTo: shareRow.leadingAnchor),
+            shareRowSeparator.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor),
+            shareRowSeparator.heightAnchor.constraint(equalToConstant: 1.0 / UIScreen.main.scale),
+
+            shareButton.topAnchor.constraint(equalTo: shareRowSeparator.bottomAnchor, constant: 2),
+            shareButton.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor, constant: -4),
+            shareButton.bottomAnchor.constraint(equalTo: shareRow.bottomAnchor, constant: -2),
+        ])
+
         addSubview(headerStack)
         addSubview(subtitleLabel)
         addSubview(snippetLabel)
+        addSubview(shareRow)
 
         NSLayoutConstraint.activate([
             iconView.widthAnchor.constraint(equalToConstant: 16),
@@ -3205,25 +3271,34 @@ final class FilePreviewCardView: UIView {
             snippetLabel.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 8),
             snippetLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             snippetLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            snippetLabel.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+
+            shareRow.topAnchor.constraint(equalTo: snippetLabel.bottomAnchor, constant: 8),
+            shareRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shareRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shareRow.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
         ])
 
-        // Drive the bottom edge off whichever element is the lowest visible
-        // one. snippetLabel-bottom is `lessThanOrEqualTo` above so it
-        // doesn't *force* height; this constraint pulls the bottom up when
-        // the snippet collapses, keeping the generic-card chip-sized.
-        let bottomEqual = bottomAnchor.constraint(equalTo: snippetLabel.bottomAnchor, constant: 12)
-        bottomEqual.priority = .defaultHigh
-        bottomEqual.isActive = true
+        // Drive the bottom edge. When the share row is visible it's the
+        // lowest element; otherwise snippet or subtitle drives height.
+        let shareRowBottom = bottomAnchor.constraint(equalTo: shareRow.bottomAnchor)
+        shareRowBottom.priority = UILayoutPriority(751)
+        shareRowBottom.isActive = true
+        let snippetBottom = bottomAnchor.constraint(equalTo: snippetLabel.bottomAnchor, constant: 12)
+        snippetBottom.priority = .defaultHigh
+        snippetBottom.isActive = true
         let subtitleBottomEqual = bottomAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12)
         subtitleBottomEqual.priority = .defaultLow
         subtitleBottomEqual.isActive = true
+
+        shareRow.clipsToBounds = true
+        shareRowCollapsed.isActive = true
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
         addGestureRecognizer(tap)
     }
 
     @objc private func handleTap() { onTap?() }
+    @objc private func handleShareTap() { onShare?() }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
         super.traitCollectionDidChange(previous)
