@@ -49,5 +49,55 @@ struct LoopAppShortcuts: AppShortcutsProvider {
             shortTitle: "Start Dictation",
             systemImageName: "mic.fill"
         )
+
+        // iOS 27+ App Intents — guarded at the shortcut level so the
+        // provider compiles on older SDKs but the entries only appear
+        // when running on iOS 27.
+        if #available(iOS 27.0, *) {
+            AppShortcut(
+                intent: AskLoopIntent(),
+                phrases: [
+                    "Ask \(.applicationName) \(\.$query)",
+                    "Hey \(.applicationName) \(\.$query)",
+                    "Tell \(.applicationName) \(\.$query)",
+                    "Ask \(.applicationName)"
+                ],
+                shortTitle: "Ask Loop",
+                systemImageName: "bubble.left.fill"
+            )
+
+            AppShortcut(
+                intent: CaptureToLoopIntent(),
+                phrases: [
+                    "Send this to \(.applicationName)",
+                    "Capture this with \(.applicationName)",
+                    "Share screen with \(.applicationName)"
+                ],
+                shortTitle: "Send to Loop",
+                systemImageName: "camera.viewfinder"
+            )
+
+            AppShortcut(
+                intent: LoopRememberIntent(),
+                phrases: [
+                    "Remember \(\.$note) with \(.applicationName)",
+                    "\(.applicationName) remember \(\.$note)",
+                    "Note \(\.$note) in \(.applicationName)"
+                ],
+                shortTitle: "Remember with Loop",
+                systemImageName: "note.text"
+            )
+
+            AppShortcut(
+                intent: SearchLoopIntent(),
+                phrases: [
+                    "Search \(.applicationName) for \(\.$query)",
+                    "Find in \(.applicationName) \(\.$query)",
+                    "What did \(.applicationName) say about \(\.$query)"
+                ],
+                shortTitle: "Search Loop",
+                systemImageName: "magnifyingglass"
+            )
+        }
     }
 }

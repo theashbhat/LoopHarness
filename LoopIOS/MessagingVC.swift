@@ -592,6 +592,15 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             object: nil
         )
 
+        // iOS 27 App Intents inject user messages via notification so the
+        // intent doesn't depend on finding MessagingVC in the responder chain.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleIntentMessage(_:)),
+            name: .loopIntentMessageReceived,
+            object: nil
+        )
+
         // Settings ▸ Model writes to TTSProviderStore from outside our setter.
         // Rebuild the speaker menu so the checkmark + voice submenu reflect
         // the new pick without waiting for the user to reopen this VC.
@@ -1029,6 +1038,18 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         // Add a small delay to ensure the view is fully loaded
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.toggleVoiceTranscription()
+        }
+    }
+
+    /// Handles a user message injected by an iOS 27 App Intent (AskLoop,
+    /// CaptureToLoop, SearchLoop). The notification carries a `"message"`
+    /// string in `userInfo` which gets piped through the same path as a
+    /// typed message.
+    @objc private func handleIntentMessage(_ notification: Notification) {
+        guard let text = notification.userInfo?["message"] as? String,
+              !text.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.didSendMessageText(text)
         }
     }
 
