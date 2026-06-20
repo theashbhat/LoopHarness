@@ -94,8 +94,9 @@ enum ModelSelection: String, CaseIterable {
     case claudeSonnet46 = "claudeSonnet46"
     case claudeHaiku45  = "claudeHaiku45"
 
-    // Fireworks — Kimi K2.6 served via Fireworks inference.
+    // Fireworks — models served via Fireworks inference.
     case fireworksKimiK26 = "fireworksKimiK26"
+    case fireworksGLM52  = "fireworksGLM52"
 
     var provider: ModelProvider {
         switch self {
@@ -105,7 +106,7 @@ enum ModelSelection: String, CaseIterable {
             return .openAI
         case .claudeOpus47, .claudeSonnet46, .claudeHaiku45:
             return .anthropic
-        case .fireworksKimiK26:
+        case .fireworksKimiK26, .fireworksGLM52:
             return .fireworks
         }
     }
@@ -122,6 +123,7 @@ enum ModelSelection: String, CaseIterable {
         case .claudeSonnet46:  return "Claude Sonnet 4.6"
         case .claudeHaiku45:   return "Claude Haiku 4.5"
         case .fireworksKimiK26: return "Kimi K2.6"
+        case .fireworksGLM52:  return "GLM 5.2"
         }
     }
 
@@ -140,6 +142,7 @@ enum ModelSelection: String, CaseIterable {
         case .claudeSonnet46:  return "claude-sonnet-4-6"
         case .claudeHaiku45:   return "claude-haiku-4-5-20251001"
         case .fireworksKimiK26: return "accounts/fireworks/models/kimi-k2p6"
+        case .fireworksGLM52:  return "accounts/fireworks/models/glm-5p2"
         }
     }
 
@@ -166,6 +169,7 @@ enum ModelSelection: String, CaseIterable {
         case .claudeSonnet46:   return 200_000
         case .claudeHaiku45:    return 200_000
         case .fireworksKimiK26: return 131_072
+        case .fireworksGLM52:  return 1_048_576
         }
     }
 
