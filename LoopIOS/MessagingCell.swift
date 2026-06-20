@@ -2523,7 +2523,7 @@ class MessagingCell: UITableViewCell {
             return
         }
         currentAttachmentId = attachment.id
-        currentAttachmentFileURL = attachment.fileURL
+        currentAttachmentFileURL = attachment.resolvedFileURL
 
         profileImageView.isHidden = true
         animatingtextView.isHidden = true
@@ -2623,7 +2623,7 @@ class MessagingCell: UITableViewCell {
         // page 1; images get loaded directly. Either way `currentAttachmentId`
         // is the gate against stale callbacks on a recycled cell.
         let id = attachment.id
-        let url = attachment.fileURL
+        let url = attachment.resolvedFileURL
         let kind = attachment.kind
         let pdfSize = CGSize(width: imageSide, height: pdfHeight)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2661,7 +2661,7 @@ class MessagingCell: UITableViewCell {
                                                 accompanyingText: String,
                                                 role: String) {
         currentAttachmentId = attachment.id
-        currentAttachmentFileURL = attachment.fileURL
+        currentAttachmentFileURL = attachment.resolvedFileURL
 
         profileImageView.isHidden = true
         animatingtextView.isHidden = true
@@ -3061,7 +3061,7 @@ final class FilePreviewCardView: UIView {
         // Bytes is best-effort; failure just hides the size suffix rather
         // than the whole subtitle (we still want the MIME-ish label).
         let sizeText: String?
-        if let bytes = (try? attachment.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
+        if let bytes = (try? attachment.resolvedFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
             sizeText = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
         } else {
             sizeText = nil

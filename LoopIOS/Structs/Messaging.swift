@@ -328,6 +328,25 @@ struct FileAttachment: Codable {
         self.extractedText = extractedText
     }
 
+    /// The attachment's file re-anchored to the *current* workspace root.
+    ///
+    /// `fileURL` is persisted as an absolute path, but on iOS the app's data
+    /// container UUID changes between installs / rebuilds, so a `fileURL` saved
+    /// in a previous container points at a directory that no longer exists.
+    /// Every attachment lives at `<workspace>/attachments/<name>`, so when the
+    /// stored absolute path is missing we re-derive it under the live
+    /// `Workspace.shared.rootURL`. Use this — not `fileURL` — anywhere the
+    /// bytes are actually read (open / preview / thumbnail / share); `fileURL`
+    /// stays the source of truth for persistence and the assistant hint.
+    var resolvedFileURL: URL {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: fileURL.path) { return fileURL }
+        let reAnchored = Workspace.shared.rootURL
+            .appendingPathComponent("attachments", isDirectory: true)
+            .appendingPathComponent(fileURL.lastPathComponent)
+        return fm.fileExists(atPath: reAnchored.path) ? reAnchored : fileURL
+    }
+
     /// Maximum number of characters from `extractedText` to inline in a
     /// chat message body. Roughly 40KB at one byte per char — enough for
     /// most short-to-medium PDFs without blowing past sensible token limits.

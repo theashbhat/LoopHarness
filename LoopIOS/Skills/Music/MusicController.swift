@@ -651,8 +651,8 @@ final class MusicController {
                 description: description,
                 items: [] as [Song]
             )
-            if !resolved.isEmpty {
-                try await MusicLibrary.shared.add(resolved, to: playlist)
+            for song in resolved {
+                try await MusicLibrary.shared.add(song, to: playlist)
             }
         }
 
