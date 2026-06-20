@@ -197,6 +197,53 @@ enum ModelSelection: String, CaseIterable {
         case .fireworks: return .fireworks
         }
     }
+
+    /// Whether this model can accept image input. Drives the per-turn vision
+    /// fallback: a turn that must send a raw image is routed to a vision-capable
+    /// model when the selected one can't see images (see
+    /// `AgentHarness.chat`). If a provider adds/removes vision support, this is
+    /// the one place to update.
+    var supportsVision: Bool {
+        switch self {
+        case .appleFoundation:
+            return false
+        case .gpt55, .gpt51, .gpt41, .gpt4o:
+            return true
+        case .claudeOpus47, .claudeSonnet46, .claudeHaiku45:
+            return true
+        case .fireworksKimiK26:
+            return true
+        case .fireworksGLM52:
+            // GLM 5.2 on Fireworks is text-only — image turns fall back to Kimi.
+            return false
+        }
+    }
+
+    /// Whether this model can actually run right now: a hosted model needs its
+    /// API key configured; Apple needs the on-device model available.
+    var isUsable: Bool {
+        guard let key = requiredKey else {
+            return ModelProvider.isAppleFoundationAvailable
+        }
+        return KeyStore.shared.source(for: key) != .missing
+    }
+
+    /// A vision-capable, currently-usable model to handle an image turn when the
+    /// selected model can't. Prefers the same provider (so keys/billing stay
+    /// consistent — e.g. GLM 5.2 → Kimi K2.6 on Fireworks), then falls back to
+    /// the first usable vision model on any hosted provider. Returns nil when no
+    /// vision-capable model is configured. Apple is never returned (no vision).
+    static func visionCapableFallback(preferring provider: ModelProvider) -> ModelSelection? {
+        if let sameProvider = models(for: provider).first(where: { $0.supportsVision && $0.isUsable }) {
+            return sameProvider
+        }
+        for other in [ModelProvider.anthropic, .openAI, .fireworks] where other != provider {
+            if let model = models(for: other).first(where: { $0.supportsVision && $0.isUsable }) {
+                return model
+            }
+        }
+        return nil
+    }
 }
 
 enum ModelSelectionStore {

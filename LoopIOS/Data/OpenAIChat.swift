@@ -71,6 +71,8 @@ final class OpenAIChat {
     /// a tool.
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              modelIDOverride: String? = nil,
+              modelStampOverride: String? = nil,
               onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
@@ -83,8 +85,10 @@ final class OpenAIChat {
 
         // The selected OpenAI model's wire id. Falls back to gpt-5.5 only if
         // somehow called for a non-OpenAI selection (routing shouldn't let
-        // that happen).
-        let modelID = ModelSelectionStore.current.apiModelID ?? "gpt-5.5"
+        // that happen). `modelIDOverride` lets background callers (e.g.
+        // VisionSummaryService) pin a cheaper vision model regardless of the
+        // user's current selection.
+        let modelID = modelIDOverride ?? ModelSelectionStore.current.apiModelID ?? "gpt-5.5"
 
         var body: [String: Any] = [
             "model": modelID,
@@ -138,7 +142,7 @@ final class OpenAIChat {
                 let msg = MessageStruct(
                     role: "assistant",
                     content: r.content,
-                    model: ModelSelectionStore.current.stampedMessageModel,
+                    model: modelStampOverride ?? ModelSelectionStore.current.stampedMessageModel,
                     functions: r.toolCalls,
                     reasoningContent: r.reasoningContent,
                     tokenUsage: r.usage,
@@ -167,7 +171,15 @@ final class OpenAIChat {
     /// Reused by sibling OpenAI-compatible clients (FireworksChat) — the
     /// wire shape is identical so there's no point duplicating the mapping.
     static func wireMessages(from messages: [MessageStruct]) -> [[String: Any]] {
-        return sanitizeToolCallPairing(stripUIPlaceholders(messages)).map { m -> [String: Any] in
+        let prepared = sanitizeToolCallPairing(stripUIPlaceholders(messages))
+        // Id of the most recent genuine human turn. An image rides inline at
+        // full resolution only while its message is this last user turn; on
+        // later turns we swap the base64 `image_url` for its cached text
+        // description (see the image branch below). Tool results are
+        // `role:"function"`, so an in-turn agent loop keeps the image raw for
+        // the whole turn that introduced it.
+        let lastUserMessageId = prepared.last { $0.role == "user" }?.id
+        return prepared.map { m -> [String: Any] in
             if m.role == "function" {
                 if let toolCallId = m.callId, !toolCallId.isEmpty {
                     return [
@@ -248,16 +260,27 @@ final class OpenAIChat {
             if let f = m.fileAttachment, f.status == .ready,
                f.kind == .image,
                let dataURL = imageDataURL(for: f) {
-                // Real OpenAI vision: a `content` array with the text context
-                // plus an `image_url` part carrying the bytes inline, so the
-                // model actually sees the image instead of just a path hint.
-                let text = m.content.isEmpty
-                    ? f.assistantHint
-                    : "\(m.content)\n\n\(f.assistantHint)"
-                out["content"] = [
-                    ["type": "text", "text": text],
-                    ["type": "image_url", "image_url": ["url": dataURL]],
-                ]
+                // Downgrade the image to its cached description on every turn
+                // after the one that introduced it — unless no summary exists
+                // yet, in which case we re-send the bytes so the model never
+                // loses sight of it (correctness over token savings).
+                let isIntroducingTurn = (m.id == lastUserMessageId)
+                if !isIntroducingTurn, let summaryHint = f.imageSummaryHint {
+                    out["content"] = m.content.isEmpty
+                        ? summaryHint
+                        : "\(m.content)\n\n\(summaryHint)"
+                } else {
+                    // Real OpenAI vision: a `content` array with the text
+                    // context plus an `image_url` part carrying the bytes
+                    // inline, so the model actually sees the image.
+                    let text = m.content.isEmpty
+                        ? f.assistantHint
+                        : "\(m.content)\n\n\(f.assistantHint)"
+                    out["content"] = [
+                        ["type": "text", "text": text],
+                        ["type": "image_url", "image_url": ["url": dataURL]],
+                    ]
+                }
             } else {
                 // Text-only: PDFs inline their extracted text via
                 // `assistantHint`; an unreadable image degrades to the path

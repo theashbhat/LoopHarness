@@ -24,14 +24,14 @@ class MainVC: MessagingVC {
     /// later calls run the pop when this flips.
     private var lastVisibilityEmpty: Bool?
 
-    /// Tinder-style swipe stack shown on the empty new-chat screen. Replaces
-    /// the hero orb whenever there are feed cards to browse; the orb steps back
-    /// to the nav bar. There is no Feed tab — this is where cards live.
-    private var feedCardStack: FeedCardStackView?
+    /// Scannable card list shown on the empty new-chat screen. Replaces the
+    /// hero orb whenever there are unarchived feed cards; the orb steps back to
+    /// the nav bar. There is no Feed tab — this is where cards live.
+    private var feedCardList: FeedCardListView?
 
-    /// True once the current empty-state stack has been populated. Reset when
-    /// the chat becomes non-empty so the next new chat reshuffles a fresh deck
-    /// rather than reloading mid-swipe on every layout pass.
+    /// True once the current empty-state list has been populated. Reset when
+    /// the chat becomes non-empty so the next new chat reloads a fresh list
+    /// rather than reloading on every layout pass.
     private var feedStackLoaded = false
 
     /// The immersive agent view when it is hosted as a child view
@@ -56,6 +56,21 @@ class MainVC: MessagingVC {
             guard let self = self, self.visible_messages.isEmpty else { return }
             self.feedStackLoaded = false
             self.refreshAvatarVisibility(animated: true)
+        }
+
+        // An edit (or archive) to a card while we're sitting on a blank chat
+        // should refresh the visible list. Deferred so it never reloads the
+        // table mid-swipe — the swipe handler removes its own row first, and
+        // this reconciles afterward against the latest store contents.
+        NotificationCenter.default.addObserver(
+            forName: CardStore.cardUpdatedNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.visible_messages.isEmpty else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                guard self.visible_messages.isEmpty else { return }
+                self.feedStackLoaded = false
+                self.refreshAvatarVisibility(animated: false)
+            }
         }
 
         // Hero owns the empty state, nav-bar avatar owns the conversation
@@ -244,41 +259,40 @@ class MainVC: MessagingVC {
         self.heroAvatar = big
     }
 
-    /// Builds the swipe stack and pins it where the hero orb sits, so it reads
-    /// as the primary empty-state element when cards exist. Hidden until
-    /// `refreshAvatarVisibility` decides there's a deck to show.
+    /// Builds the card list and fills the empty-state area above the input bar,
+    /// so it reads as the primary empty-state element when cards exist. Hidden
+    /// until `refreshAvatarVisibility` decides there's a list to show.
     private func setupFeedCardStack() {
-        let stack = FeedCardStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.isHidden = true
+        let list = FeedCardListView()
+        list.translatesAutoresizingMaskIntoConstraints = false
+        list.isHidden = true
         // Below the message box for the same reason as the hero — never cover
         // the input bar.
-        view.insertSubview(stack, belowSubview: messageBox)
+        view.insertSubview(list, belowSubview: messageBox)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
-            stack.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor, constant: -40),
-            // 4:3 poster aspect (matches the card renderers).
-            stack.heightAnchor.constraint(equalTo: stack.widthAnchor, multiplier: 3.0/4.0),
+            list.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            list.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            list.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            list.bottomAnchor.constraint(equalTo: messageBox.topAnchor, constant: -8),
         ])
 
-        stack.onTap = { [weak self] card in
+        list.onTap = { [weak self] card in
             guard let self = self else { return }
             let latest = CardStore.shared.card(for: card.id) ?? card
             let detail = CardDetailViewController(card: latest)
             let nav = UINavigationController(rootViewController: detail)
             self.present(nav, animated: true)
         }
-        stack.onDelete = { card in
-            CardStore.shared.remove(id: card.id)
+        list.onArchive = { card in
+            CardStore.shared.updateState(id: card.id, state: .archived)
         }
-        stack.onEmptied = { [weak self] in
-            // Deck exhausted — bring the orb back.
+        list.onEmptied = { [weak self] in
+            // Last card cleared — bring the orb back.
             self?.refreshAvatarVisibility(animated: true)
         }
 
-        self.feedCardStack = stack
+        self.feedCardList = list
     }
 
     /// Subscribes both avatars to the shared VoiceLoopCoordinator. Same
@@ -407,10 +421,6 @@ class MainVC: MessagingVC {
         refreshAvatarVisibility()
     }
 
-    override func messagesDidReload() {
-        refreshAvatarVisibility()
-    }
-
     override func loadConversation(_ conversation: SimpleConversation) {
         super.loadConversation(conversation)
         refreshAvatarVisibility()
@@ -434,19 +444,19 @@ class MainVC: MessagingVC {
         // fresh deck — and so we never reload mid-swipe on a layout pass.
         if chatEmpty {
             if !feedStackLoaded {
-                feedCardStack?.setCards(CardStore.shared.feedCards)
+                feedCardList?.setCards(CardStore.shared.feedCards)
                 feedStackLoaded = true
             }
         } else {
             feedStackLoaded = false
         }
 
-        // The stack owns the empty state when it has cards; otherwise the orb
+        // The list owns the empty state when it has cards; otherwise the orb
         // does. `heroShown` is the orb's truth — note it's false while the
-        // stack is up, which is what relegates the orb to the nav bar.
-        let stackHasCards = chatEmpty && !(feedCardStack?.isEmpty ?? true)
+        // list is up, which is what relegates the orb to the nav bar.
+        let stackHasCards = chatEmpty && !(feedCardList?.isEmpty ?? true)
         let heroShown = chatEmpty && !stackHasCards
-        feedCardStack?.isHidden = !stackHasCards
+        feedCardList?.isHidden = !stackHasCards
 
         let previous = lastVisibilityEmpty
         let isInitial = (previous == nil)

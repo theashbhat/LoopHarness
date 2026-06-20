@@ -26,8 +26,10 @@ enum CardMarkdown {
     static func attributed(_ markdown: String,
                            bodyFont: UIFont,
                            textColor: UIColor,
-                           headingColor: UIColor? = nil) -> NSAttributedString {
+                           headingColor: UIColor? = nil,
+                           bulletColor: UIColor? = nil) -> NSAttributedString {
         let headingColor = headingColor ?? textColor
+        let bulletColor = bulletColor ?? textColor
         let out = NSMutableAttributedString()
         let lines = markdown
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -54,7 +56,11 @@ enum CardMarkdown {
                 content = inline(String(trimmed.dropFirst(2)), baseFont: f, color: headingColor)
             } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
                 para.headIndent = bodyFont.pointSize * 1.2 // wrapped lines hang under text
-                content = inline("•  " + String(trimmed.dropFirst(2)), baseFont: bodyFont, color: textColor)
+                let bullet = NSMutableAttributedString(
+                    string: "•  ",
+                    attributes: [.font: bodyFont, .foregroundColor: bulletColor])
+                bullet.append(inline(String(trimmed.dropFirst(2)), baseFont: bodyFont, color: textColor))
+                content = bullet
             } else if let rest = numberedListBody(trimmed) {
                 para.headIndent = bodyFont.pointSize * 1.4
                 content = inline(rest, baseFont: bodyFont, color: textColor)

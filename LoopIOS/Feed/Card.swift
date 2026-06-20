@@ -25,8 +25,8 @@ enum CardState: String, Codable {
 struct Card: Codable, Identifiable {
     let id: String
     let kind: CardKind
-    let title: String
-    let body: String
+    var title: String
+    var body: String
     /// Relative path to the rendered poster image inside workspace (e.g.
     /// "cards/assets/<id>.png"). Nil while the renderer is still working.
     var imageURL: String?

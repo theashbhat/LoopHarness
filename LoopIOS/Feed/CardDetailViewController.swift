@@ -2,8 +2,9 @@
 //  CardDetailViewController.swift
 //  Loop
 //
-//  Expanded detail view for a single card. Shows the full poster, title,
-//  body, metadata, and action buttons (Keep / Archive).
+//  Expanded detail for a single card, presented as a dark sheet. A header row
+//  carries the icon tile, kind badge, and a close button; the body renders the
+//  card's markdown; a pinned bottom bar offers Archive / Done.
 //
 
 #if os(iOS)
@@ -13,24 +14,42 @@ final class CardDetailViewController: UIViewController {
 
     private let card: Card
 
+    /// Warm gold accent shared with the card list.
+    private let accent = FeedCardListView.accent
+    /// Near-black sheet background.
+    private let sheetBackground = UIColor(red: 0.05, green: 0.05, blue: 0.055, alpha: 1)
+
     // MARK: - UI
 
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
 
-    private let posterImageView: UIImageView = {
+    private let iconTile: UIView = {
+        let v = UIView()
+        v.layer.cornerRadius = 11
+        v.layer.cornerCurve = .continuous
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+
+    private let iconView: UIImageView = {
         let iv = UIImageView()
         iv.contentMode = .scaleAspectFit
-        iv.clipsToBounds = true
-        iv.layer.cornerRadius = 12
-        iv.backgroundColor = UIColor(red: 0.1, green: 0.1, blue: 0.14, alpha: 1)
+        iv.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        iv.translatesAutoresizingMaskIntoConstraints = false
         return iv
+    }()
+
+    private let badgeLabel: UILabel = {
+        let l = UILabel()
+        l.font = .systemFont(ofSize: 13, weight: .bold)
+        return l
     }()
 
     private let titleLabel: UILabel = {
         let l = UILabel()
-        l.font = .systemFont(ofSize: 28, weight: .bold)
-        l.textColor = .label
+        l.font = .systemFont(ofSize: 32, weight: .bold)
+        l.textColor = .white
         l.numberOfLines = 0
         return l
     }()
@@ -38,25 +57,24 @@ final class CardDetailViewController: UIViewController {
     private let bodyLabel: UILabel = {
         let l = UILabel()
         l.font = .systemFont(ofSize: 17, weight: .regular)
-        l.textColor = .secondaryLabel
+        l.textColor = UIColor(white: 0.78, alpha: 1)
         l.numberOfLines = 0
         return l
+    }()
+
+    private let divider: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor(white: 1, alpha: 0.1)
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
     }()
 
     private let metaLabel: UILabel = {
         let l = UILabel()
-        l.font = .systemFont(ofSize: 13, weight: .regular)
-        l.textColor = .tertiaryLabel
+        l.font = .systemFont(ofSize: 14, weight: .regular)
+        l.textColor = UIColor(white: 0.5, alpha: 1)
         l.numberOfLines = 0
         return l
-    }()
-
-    private let actionStack: UIStackView = {
-        let s = UIStackView()
-        s.axis = .horizontal
-        s.spacing = 16
-        s.distribution = .fillEqually
-        return s
     }()
 
     // MARK: - Init
@@ -74,137 +92,192 @@ final class CardDetailViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        title = "Card"
-        // When presented modally (pill tap / new-chat stack) we're the root of
-        // a navigation controller, so there's no back button — add Done.
-        if navigationController?.viewControllers.first === self,
-           presentingViewController != nil {
-            navigationItem.leftBarButtonItem = UIBarButtonItem(
-                barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
+        view.backgroundColor = sheetBackground
+        navigationController?.setNavigationBarHidden(true, animated: false)
+        if let sheet = (navigationController ?? self).sheetPresentationController {
+            sheet.prefersGrabberVisible = true
         }
         setupLayout()
         populate()
     }
 
-    @objc private func doneTapped() {
-        dismissOrPop()
-    }
-
-    /// Pop when pushed, dismiss when presented modally.
-    private func dismissOrPop() {
-        if let nav = navigationController, nav.viewControllers.first !== self {
-            nav.popViewController(animated: true)
-        } else {
-            dismiss(animated: true)
-        }
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        navigationController?.setNavigationBarHidden(true, animated: animated)
     }
 
     // MARK: - Layout
 
     private func setupLayout() {
+        let header = makeHeader()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(header)
+
+        let actionBar = makeActionBar()
+        actionBar.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(actionBar)
+
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.showsVerticalScrollIndicator = false
         view.addSubview(scrollView)
 
         contentStack.axis = .vertical
-        contentStack.spacing = 16
+        contentStack.spacing = 18
+        contentStack.alignment = .fill
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         scrollView.addSubview(contentStack)
 
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-
-            contentStack.topAnchor.constraint(equalTo: scrollView.topAnchor, constant: 20),
-            contentStack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 20),
-            contentStack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -20),
-            contentStack.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -20),
-            contentStack.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -40),
-        ])
-
-        // Poster with 4:3 aspect
-        posterImageView.translatesAutoresizingMaskIntoConstraints = false
-        let posterHeight = posterImageView.heightAnchor.constraint(equalTo: posterImageView.widthAnchor, multiplier: 3.0/4.0)
-        posterHeight.isActive = true
-
-        contentStack.addArrangedSubview(posterImageView)
         contentStack.addArrangedSubview(titleLabel)
         contentStack.addArrangedSubview(bodyLabel)
+        contentStack.addArrangedSubview(divider)
         contentStack.addArrangedSubview(metaLabel)
-        contentStack.addArrangedSubview(actionStack)
+        contentStack.setCustomSpacing(22, after: bodyLabel)
+        contentStack.setCustomSpacing(14, after: divider)
 
-        contentStack.setCustomSpacing(24, after: posterImageView)
-        contentStack.setCustomSpacing(24, after: bodyLabel)
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
 
-        // Action buttons
-        let keepBtn = makeActionButton(title: "Keep", color: .systemGreen, action: #selector(keepTapped))
-        let archiveBtn = makeActionButton(title: "Archive", color: .systemOrange, action: #selector(archiveTapped))
-        actionStack.addArrangedSubview(keepBtn)
-        actionStack.addArrangedSubview(archiveBtn)
+            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: actionBar.topAnchor),
+
+            contentStack.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            contentStack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 24),
+            contentStack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -24),
+            contentStack.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -24),
+            contentStack.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -48),
+
+            divider.heightAnchor.constraint(equalToConstant: 1),
+
+            actionBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            actionBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            actionBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+        ])
     }
 
-    private func makeActionButton(title: String, color: UIColor, action: Selector) -> UIButton {
-        let btn = UIButton(type: .system)
-        btn.setTitle(title, for: .normal)
-        btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        btn.backgroundColor = color
-        btn.layer.cornerRadius = 12
-        btn.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        btn.addTarget(self, action: action, for: .touchUpInside)
-        return btn
+    /// Icon tile + kind badge on the left, close button on the right.
+    private func makeHeader() -> UIView {
+        let container = UIView()
+
+        iconTile.addSubview(iconView)
+        container.addSubview(iconTile)
+        container.addSubview(badgeLabel)
+        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let close = UIButton(type: .system)
+        close.setImage(UIImage(systemName: "xmark",
+                               withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)),
+                       for: .normal)
+        close.tintColor = UIColor(white: 0.85, alpha: 1)
+        close.backgroundColor = UIColor(white: 1, alpha: 0.1)
+        close.layer.cornerRadius = 18
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        container.addSubview(close)
+
+        NSLayoutConstraint.activate([
+            iconTile.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            iconTile.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            iconTile.widthAnchor.constraint(equalToConstant: 40),
+            iconTile.heightAnchor.constraint(equalToConstant: 40),
+            container.heightAnchor.constraint(equalToConstant: 40),
+
+            iconView.centerXAnchor.constraint(equalTo: iconTile.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
+
+            badgeLabel.leadingAnchor.constraint(equalTo: iconTile.trailingAnchor, constant: 12),
+            badgeLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+
+            close.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            close.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            close.widthAnchor.constraint(equalToConstant: 36),
+            close.heightAnchor.constraint(equalToConstant: 36),
+        ])
+        return container
+    }
+
+    /// Pinned Archive (gold-outlined) / Done (filled) buttons.
+    private func makeActionBar() -> UIView {
+        let archive = UIButton(type: .system)
+        archive.setTitle("Archive", for: .normal)
+        archive.setTitleColor(accent, for: .normal)
+        archive.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        archive.backgroundColor = accent.withAlphaComponent(0.08)
+        archive.layer.cornerRadius = 14
+        archive.layer.cornerCurve = .continuous
+        archive.layer.borderWidth = 1
+        archive.layer.borderColor = accent.withAlphaComponent(0.7).cgColor
+        archive.addTarget(self, action: #selector(archiveTapped), for: .touchUpInside)
+
+        let done = UIButton(type: .system)
+        done.setTitle("Done", for: .normal)
+        done.setTitleColor(.white, for: .normal)
+        done.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        done.backgroundColor = UIColor(white: 1, alpha: 0.1)
+        done.layer.cornerRadius = 14
+        done.layer.cornerCurve = .continuous
+        done.addTarget(self, action: #selector(doneTapped), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [archive, done])
+        stack.axis = .horizontal
+        stack.spacing = 14
+        stack.distribution = .fillEqually
+        archive.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        done.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        return stack
     }
 
     // MARK: - Populate
 
     private func populate() {
+        let style = card.displayIcon
+        iconView.image = UIImage(systemName: style.symbol)
+        iconView.tintColor = style.tint.withAlphaComponent(0.95)
+        iconTile.backgroundColor = style.tint.withAlphaComponent(0.22)
+
+        badgeLabel.attributedText = NSAttributedString(
+            string: card.displayBadge,
+            attributes: [.kern: 1.5, .foregroundColor: accent,
+                         .font: UIFont.systemFont(ofSize: 13, weight: .bold)])
+
         titleLabel.text = card.title
+
         if card.kind == .markdown {
-            // The markdown body below already carries the full formatted
-            // content, so the poster (which renders the same title + body) is
-            // redundant here — hide it and let the text stand on its own.
-            posterImageView.isHidden = true
             bodyLabel.attributedText = CardMarkdown.attributed(
                 card.body,
                 bodyFont: .systemFont(ofSize: 17, weight: .regular),
-                textColor: .secondaryLabel,
-                headingColor: .label)
+                textColor: UIColor(white: 0.82, alpha: 1),
+                headingColor: .white,
+                bulletColor: accent)
         } else {
             bodyLabel.text = card.body
         }
 
-        var meta = "\(card.kind.rawValue) card"
-        if let source = card.source { meta += " · \(source)" }
+        var meta = "\(card.kind.rawValue.capitalized) card"
+        if let source = card.source { meta += " · created from \(source)" }
         let df = DateFormatter()
         df.dateStyle = .medium
-        df.timeStyle = .short
+        df.timeStyle = .none
         meta += " · \(df.string(from: card.createdAt))"
-        if !card.tags.isEmpty { meta += "\n\(card.tags.map { "#\($0)" }.joined(separator: " "))" }
         metaLabel.text = meta
-
-        if card.kind != .markdown, let posterURL = CardStore.shared.posterURL(for: card) {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let data = try? Data(contentsOf: posterURL),
-                      let image = UIImage(data: data) else { return }
-                DispatchQueue.main.async {
-                    self?.posterImageView.image = image
-                }
-            }
-        }
     }
 
     // MARK: - Actions
 
-    @objc private func keepTapped() {
+    @objc private func closeTapped() { dismiss(animated: true) }
+
+    @objc private func doneTapped() {
+        // "Done" acknowledges the card but keeps it in the feed.
         CardStore.shared.updateState(id: card.id, state: .kept)
-        dismissOrPop()
+        dismiss(animated: true)
     }
 
     @objc private func archiveTapped() {
         CardStore.shared.updateState(id: card.id, state: .archived)
-        dismissOrPop()
+        dismiss(animated: true)
     }
 }
 

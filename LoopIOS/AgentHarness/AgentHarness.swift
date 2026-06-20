@@ -110,6 +110,7 @@ final class AgentHarness {
             ("Scheduler",        "Schedule reminders and recurring background tasks", SchedulerSkill.tools),
             ("VM Agents",        "Recurring agents that run on your SSH VM on a cron schedule and push results", VMCronSkill.tools),
             ("Web Search",       "Search the web for up-to-date information", ExaSkill.tools),
+            ("Image Search",     "Search the web for real photos and render them inline as a gallery", SerpImageSearchSkill.tools),
             ("URL Fetch",        "Fetch and read a single web page (no API key)", URLFetchSkill.tools),
             ("Git",              "Clone, pull, and check status of git repositories", GitSkill.tools),
             ("GitHub",           "Review/merge/comment on PRs, open PRs and issues, browse repos and notifications", GitHubSkill.tools),
@@ -154,6 +155,7 @@ final class AgentHarness {
             SchedulerSkill.systemPromptFragment,
             VMCronSkill.systemPromptFragment,
             ExaSkill.systemPromptFragment,
+            SerpImageSearchSkill.systemPromptFragment,
             URLFetchSkill.systemPromptFragment,
             GitSkill.systemPromptFragment,
             GitHubSkill.systemPromptFragment,
@@ -428,6 +430,27 @@ final class AgentHarness {
         var rebuilt: [MessageStruct] = [MessageStruct(role: "system", content: composedSystem)]
         rebuilt.append(contentsOf: messages.filter { $0.role != "system" })
 
+        // Per-turn vision fallback. If this request will send a raw image but
+        // the selected model can't see images (e.g. GLM 5.2 on Fireworks),
+        // route just this request to a vision-capable model — preferring the
+        // same provider, so GLM 5.2 falls back to Kimi K2.6 on the same key.
+        // Only the image-bearing turn is rerouted: by the next turn the image
+        // has been replaced with its text summary (VisionSummaryService), so
+        // the selected model picks the conversation back up on its own.
+        let selected = ModelSelectionStore.current
+        var routeProvider = selected.provider
+        var modelIDOverride: String? = nil
+        var modelStampOverride: String? = nil
+        if !selected.supportsVision,
+           Self.turnSendsRawImage(rebuilt),
+           let fallback = ModelSelection.visionCapableFallback(preferring: selected.provider),
+           fallback != selected {
+            routeProvider = fallback.provider
+            modelIDOverride = fallback.apiModelID
+            modelStampOverride = fallback.stampedMessageModel
+            print("AgentHarness: \(selected.displayName) can't see images; routing this image turn to \(fallback.displayName)")
+        }
+
         // Hosted provider selected → talk straight to it with the user's own
         // key (Settings ▸ Keys). This deliberately bypasses the `Cloud`
         // backend: the open-source export ships `Cloud.url` as a placeholder,
@@ -437,18 +460,31 @@ final class AgentHarness {
         // fallback is exactly what made a missing key look like "the agent
         // ignores my model settings". Apple is opt-in via Settings ▸ Model
         // (handled by the `.apple` branch above).
-        switch ModelSelectionStore.current.provider {
+        switch routeProvider {
         case .anthropic:
-            AnthropicChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
+            AnthropicChat.shared.chat(messages: rebuilt, tools: toolsToSend, modelIDOverride: modelIDOverride, modelStampOverride: modelStampOverride, onPartial: onPartial, completion: completion)
         case .openAI:
-            OpenAIChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
+            OpenAIChat.shared.chat(messages: rebuilt, tools: toolsToSend, modelIDOverride: modelIDOverride, modelStampOverride: modelStampOverride, onPartial: onPartial, completion: completion)
         case .fireworks:
-            FireworksChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
+            FireworksChat.shared.chat(messages: rebuilt, tools: toolsToSend, modelIDOverride: modelIDOverride, modelStampOverride: modelStampOverride, onPartial: onPartial, completion: completion)
         case .apple:
             // Unreachable — `.apple` returned via offlineRespond above. Kept
             // so the switch stays exhaustive if providers are added.
             offlineRespond(messages: messages, completion: completion)
         }
+    }
+
+    /// True when this turn's context contains a ready image attachment that the
+    /// chat clients will send as a raw image block — i.e. it's the most recent
+    /// human turn, or it has no text description yet. Mirrors the downgrade
+    /// condition in `AnthropicChat.wirePayload` / `OpenAIChat.wireMessages`.
+    private static func turnSendsRawImage(_ messages: [MessageStruct]) -> Bool {
+        let lastUserId = messages.last { $0.role == "user" }?.id
+        for m in messages {
+            guard let f = m.fileAttachment, f.kind == .image, f.status == .ready else { continue }
+            if m.id == lastUserId || f.visionSummary == nil { return true }
+        }
+        return false
     }
 
     // MARK: - Offline path

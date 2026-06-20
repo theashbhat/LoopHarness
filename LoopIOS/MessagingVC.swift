@@ -386,6 +386,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             // with a fileAttachment; image / map skills do the same.
             if $0.imageAttachment != nil { return true }
             if $0.mapAttachment != nil { return true }
+            if $0.imageGalleryAttachment != nil { return true }
             if $0.fileAttachment != nil { return true }
             // Assistant turns carrying tool calls are now surfaced as a
             // collapsible "Used N tools" disclosure, so they're kept (they
@@ -408,6 +409,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
                 && !m.functions.isEmpty
                 && m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && m.imageAttachment == nil && m.mapAttachment == nil && m.fileAttachment == nil
+                && m.imageGalleryAttachment == nil
         }
         var out: [MessageStruct] = []
         for message in messages {
@@ -1239,9 +1241,6 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     /// to refresh orb visibility so the hero/nav-bar handoff stays correct
     /// on every message-load path — not just `loadConversation` and
     /// `newMessageSent`.
-    func messagesDidReload() {
-    }
-
     // MARK: - Store change observation
 
     /// Re-read the current conversation from the store when iCloud sync or
@@ -1538,6 +1537,15 @@ extension MessagingVC: MessageBoxDelegate {
         // Reset the anti-loop guard so prior tool-call patterns don't
         // bleed into the new user turn.
         ToolCallGuard.shared.resetForNewTurn()
+
+        // Kick off background descriptions for any image attachment in this
+        // conversation that doesn't have one yet. Generating now — at send
+        // time — means the description is usually ready by the user's next
+        // turn, at which point the chat clients stop re-sending the raw image
+        // and inline the text instead. Idempotent (guarded per attachment id),
+        // so re-running every turn is fine. Remote (OpenClaw) conversations
+        // already reference images by workspace path and returned above.
+        VisionSummaryService.shared.ensureSummaries(for: self.messages, conversationId: requestConversationId)
 
         let initialContext = self.chatContextMessages
         self.beginStreamingTurn()
@@ -3716,9 +3724,18 @@ extension MessagingVC: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // The reveal pan accepts touches anywhere on the transcript; only the
-        // side-drawer edge pan is restricted to the left edge.
-        if gestureRecognizer == timeRevealPan { return true }
+        // The reveal pan accepts touches anywhere on the transcript, EXCEPT
+        // inside an image-search gallery — a horizontal swipe there should
+        // scroll the thumbnails, not drag the whole transcript to reveal
+        // timestamps.
+        if gestureRecognizer == timeRevealPan {
+            var v: UIView? = touch.view
+            while let cur = v {
+                if cur is ImageGalleryScrollView { return false }
+                v = cur.superview
+            }
+            return true
+        }
         // Only respond to touches that start near the left edge and when side drawer is not open
         let location = touch.location(in: view)
         return location.x <= 20 && sideDrawer == nil

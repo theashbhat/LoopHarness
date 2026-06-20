@@ -76,6 +76,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				AppIntents/AskLoopIntent.swift,
+				AppIntents/CaptureToLoopIntent.swift,
 				Assets.xcassets,
 				HelperViews/AvatarView.swift,
 				HelperViews/ShimmerLabel.swift,
@@ -112,8 +114,6 @@
 				SpeechPipeline/EarconPlayer.swift,
 				SpeechPipeline/VoiceLoopCoordinator.swift,
 				TriggerIntent.swift,
-				AppIntents/AskLoopIntent.swift,
-				AppIntents/CaptureToLoopIntent.swift,
 			);
 			target = 6B00010A00000000DEADBEEF /* LoopMac */;
 		};
@@ -128,6 +128,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				AppIntents/AskLoopIntent.swift,
+				AppIntents/CaptureToLoopIntent.swift,
 				HelperViews/AvatarView.swift,
 				HelperViews/ShimmerLabel.swift,
 				ImageViewerVC.swift,
@@ -161,8 +163,6 @@
 				Skills/SSH/SSHTerminalTheme.swift,
 				Skills/SSH/SSHTerminalViewController.swift,
 				TriggerIntent.swift,
-				AppIntents/AskLoopIntent.swift,
-				AppIntents/CaptureToLoopIntent.swift,
 			);
 			target = 6C00020A00000000DEADBEEF /* LoopVision */;
 		};

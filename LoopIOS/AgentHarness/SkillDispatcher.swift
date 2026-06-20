@@ -98,6 +98,9 @@ final class SkillDispatcher {
         if ExaSkill.shared.handles(functionName: call.name) {
             ExaSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
+        if SerpImageSearchSkill.shared.handles(functionName: call.name) {
+            SerpImageSearchSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
+        }
         if URLFetchSkill.shared.handles(functionName: call.name) {
             URLFetchSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }

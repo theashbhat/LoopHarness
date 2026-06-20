@@ -71,6 +71,10 @@ struct SimpleMessage: Codable {
     /// an app kill (reload coerces a stale `.generating` to a retryable
     /// `.failed`).
     let imageAttachment: String?
+    /// JSON-encoded `ImageGalleryAttachment` (web image-search results). Nil
+    /// unless `SerpImageSearchSkill` ran for this turn. Persisted so the inline
+    /// thumbnail gallery survives relaunch.
+    let imageGalleryAttachment: String?
     /// Which model produced the message — "GPT 5.5 Instant", "Apple LLM",
     /// etc. Optional for backward compatibility with NDJSON entries written
     /// before this field existed. When nil, callers default to whatever
@@ -97,6 +101,7 @@ struct SimpleMessage: Codable {
          fileAttachment: String? = nil,
          mapAttachment: String? = nil,
          imageAttachment: String? = nil,
+         imageGalleryAttachment: String? = nil,
          model: String? = nil,
          isCompactionSummary: Bool? = nil,
          responseSeconds: TimeInterval? = nil,
@@ -112,6 +117,7 @@ struct SimpleMessage: Codable {
         self.fileAttachment = fileAttachment
         self.mapAttachment = mapAttachment
         self.imageAttachment = imageAttachment
+        self.imageGalleryAttachment = imageGalleryAttachment
         self.model = model
         self.isCompactionSummary = isCompactionSummary
         self.responseSeconds = responseSeconds
@@ -279,6 +285,32 @@ class SimpleConversationManager {
         }
     }
 
+    /// Persist a freshly generated vision description onto an image attachment
+    /// already stored in the conversation. `VisionSummaryService` calls this
+    /// off the chat-completion path once it has a description, so subsequent
+    /// turns can inline the text instead of re-sending the raw image. Looks the
+    /// message up by the attachment's `id` (which survives the SimpleMessage
+    /// round-trip), stamps `visionSummary`, and re-saves in place via
+    /// `updateMessage`. No-op — returns false — when the conversation or
+    /// attachment can't be found or a summary is already present.
+    @discardableResult
+    func updateAttachmentSummary(attachmentId: String, summary: String, conversationId: String) -> Bool {
+        guard let conversation = router.conversation(id: conversationId) else { return false }
+        for simple in router.messages(forConversation: conversationId) {
+            guard let attachmentString = simple.fileAttachment,
+                  let data = attachmentString.data(using: .utf8),
+                  let attachment = try? JSONDecoder().decode(FileAttachment.self, from: data),
+                  attachment.id == attachmentId else { continue }
+            // Already summarized (e.g. two in-flight jobs raced) — leave it.
+            guard attachment.visionSummary == nil else { return false }
+            var message = messageStruct(from: simple)
+            message.fileAttachment?.visionSummary = summary
+            updateMessage(message, in: conversation)
+            return true
+        }
+        return false
+    }
+
     /// Serializes a `MessageStruct` into the persisted `SimpleMessage` shape.
     /// Shared by `addMessage` (createdAt = now) and `updateMessage` (createdAt
     /// = the original, to keep ordering stable on rewrite).
@@ -354,6 +386,16 @@ class SimpleConversationManager {
             }
         }
 
+        // Serialize the web image-search gallery so the thumbnail strip
+        // survives relaunch / sync (URLs only — images re-fetch on display).
+        var imageGalleryAttachmentString: String? = nil
+        if let attachment = messageStruct.imageGalleryAttachment {
+            if let data = try? JSONEncoder().encode(attachment),
+               let string = String(data: data, encoding: .utf8) {
+                imageGalleryAttachmentString = string
+            }
+        }
+
         return SimpleMessage(
             id: messageStruct.id,
             role: messageStruct.role,
@@ -366,6 +408,7 @@ class SimpleConversationManager {
             fileAttachment: fileAttachmentString,
             mapAttachment: mapAttachmentString,
             imageAttachment: imageAttachmentString,
+            imageGalleryAttachment: imageGalleryAttachmentString,
             // Persist model attribution so reload paths can show the same
             // "Apple LLM" / "GPT 5.5 Instant" badge that the live append
             // path renders. Only meaningful for assistant turns. User turns
@@ -555,6 +598,12 @@ class SimpleConversationManager {
            let imageData = imageString.data(using: .utf8),
            let image = try? JSONDecoder().decode(ImageAttachment.self, from: imageData) {
             messageStruct.imageAttachment = image
+        }
+
+        if let galleryString = simpleMessage.imageGalleryAttachment,
+           let galleryData = galleryString.data(using: .utf8),
+           let gallery = try? JSONDecoder().decode(ImageGalleryAttachment.self, from: galleryData) {
+            messageStruct.imageGalleryAttachment = gallery
         }
 
         if simpleMessage.isCompactionSummary == true {

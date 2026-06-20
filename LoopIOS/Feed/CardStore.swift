@@ -59,16 +59,12 @@ final class CardStore {
 
     // MARK: - Public API
 
-    /// All cards ordered newest-first. `new` cards before `kept`; `archived` excluded.
+    /// All non-archived cards ordered strictly newest-first by creation date.
     var feedCards: [Card] {
         lock.lock(); defer { lock.unlock() }
         return cache.values
             .filter { $0.state != .archived }
-            .sorted { lhs, rhs in
-                if lhs.state == .new && rhs.state != .new { return true }
-                if lhs.state != .new && rhs.state == .new { return false }
-                return lhs.createdAt > rhs.createdAt
-            }
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     /// All cards including archived (for settings recovery).
@@ -85,6 +81,21 @@ final class CardStore {
         lock.unlock()
         writeToDisk(card)
         NotificationCenter.default.post(name: CardStore.cardAddedNotification, object: card)
+        return card
+    }
+
+    /// Apply edits to an existing card's content and persist. The closure
+    /// receives the current card to mutate in place. Returns the updated card,
+    /// or nil if no card with `id` exists.
+    @discardableResult
+    func update(id: String, _ mutate: (inout Card) -> Void) -> Card? {
+        lock.lock()
+        guard var card = cache[id] else { lock.unlock(); return nil }
+        mutate(&card)
+        cache[id] = card
+        lock.unlock()
+        writeToDisk(card)
+        NotificationCenter.default.post(name: CardStore.cardUpdatedNotification, object: card)
         return card
     }
 

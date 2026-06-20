@@ -26,6 +26,9 @@ xcuserdata/
 *.dSYM.zip
 *.dSYM
 *.swiftpm
+# Built app bundles / disk images bake in build-time secrets — never commit
+*.app/
+*.dmg
 
 # ─── macOS ────────────────────────────────────────────────────────────
 .DS_Store

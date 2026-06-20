@@ -906,6 +906,8 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                 let m = manager.messageStruct(from: message)
                 if let mapAttachment = m.mapAttachment {
                     stack.addArrangedSubview(makeMapRow(bubbleView: MapBubbleView(attachment: mapAttachment)))
+                } else if let gallery = m.imageGalleryAttachment {
+                    stack.addArrangedSubview(makeImageGalleryRow(bubbleView: ImageGalleryBubbleView(attachment: gallery)))
                 } else if let fileAttachment = m.fileAttachment {
                     // role="assistant" routes the existing bubble factory
                     // to the assistant-side alignment (leading edge,
@@ -1002,6 +1004,8 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                                                                        role: message.role))
                     } else if let mapAttachment = m.mapAttachment {
                         stack.addArrangedSubview(makeMapRow(bubbleView: MapBubbleView(attachment: mapAttachment)))
+                    } else if let gallery = m.imageGalleryAttachment {
+                        stack.addArrangedSubview(makeImageGalleryRow(bubbleView: ImageGalleryBubbleView(attachment: gallery)))
                     } else {
                         stack.addArrangedSubview(makeBubble(role: message.role, text: message.content, model: m.role == "assistant" ? m.model : nil))
                     }
@@ -2065,6 +2069,22 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         return row
     }
 
+    /// Wrap a web image-search gallery in the same left-aligned assistant-side
+    /// row layout as image / map bubbles.
+    private func makeImageGalleryRow(bubbleView: ImageGalleryBubbleView) -> NSView {
+        bubbleView.translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.addArrangedSubview(bubbleView)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        bubbleView.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        return row
+    }
+
     private func scrollToBottom() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self,
@@ -2306,6 +2326,118 @@ final class ImageBubbleView: NSView {
     }
 }
 
+/// Assistant-side bubble that renders web image-search results
+/// (`ImageGalleryAttachment`) as a horizontal strip of thumbnails. Thumbnails
+/// load asynchronously from their remote URLs; clicking one opens the
+/// full-resolution image in the default browser.
+final class ImageGalleryBubbleView: NSView {
+    private let attachment: ImageGalleryAttachment
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let scrollView = NSScrollView()
+    private let stack = NSStackView()
+    private static let thumbSide: CGFloat = 120
+
+    init(attachment: ImageGalleryAttachment) {
+        self.attachment = attachment
+        super.init(frame: .zero)
+        configure()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func configure() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let query = attachment.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.maximumNumberOfLines = 2
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.stringValue = query
+        titleLabel.isHidden = query.isEmpty
+        addSubview(titleLabel)
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasHorizontalScroller = true
+        scrollView.hasVerticalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        addSubview(scrollView)
+
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(stack)
+        scrollView.documentView = documentView
+
+        let side = ImageGalleryBubbleView.thumbSide
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: topAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            scrollView.topAnchor.constraint(equalTo: query.isEmpty ? topAnchor : titleLabel.bottomAnchor,
+                                            constant: query.isEmpty ? 0 : 6),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollView.heightAnchor.constraint(equalToConstant: side),
+
+            stack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: documentView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
+            documentView.heightAnchor.constraint(equalToConstant: side),
+        ])
+
+        for (index, item) in attachment.items.enumerated() {
+            let tile = makeTile(side: side, index: index)
+            stack.addArrangedSubview(tile)
+            if let thumbURL = URL(string: item.thumbnailURL) {
+                loadThumbnail(thumbURL, into: tile)
+            }
+        }
+    }
+
+    private func makeTile(side: CGFloat, index: Int) -> NSImageView {
+        let iv = ClickableImageView()
+        iv.tag = index
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.wantsLayer = true
+        iv.layer?.cornerRadius = 10
+        iv.layer?.masksToBounds = true
+        iv.layer?.borderWidth = 1
+        iv.layer?.borderColor = NSColor.separatorColor.cgColor
+        iv.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        iv.onClick = { [weak self] in
+            guard let self = self,
+                  index < self.attachment.items.count,
+                  let url = URL(string: self.attachment.items[index].originalURL) else { return }
+            NSWorkspace.shared.open(url)
+        }
+        NSLayoutConstraint.activate([
+            iv.widthAnchor.constraint(equalToConstant: side),
+            iv.heightAnchor.constraint(equalToConstant: side),
+        ])
+        return iv
+    }
+
+    private func loadThumbnail(_ url: URL, into tile: NSImageView) {
+        URLSession.shared.dataTask(with: url) { [weak tile] data, _, _ in
+            guard let data = data, let image = NSImage(data: data) else { return }
+            DispatchQueue.main.async {
+                tile?.image = image
+                tile?.layer?.backgroundColor = NSColor.clear.cgColor
+            }
+        }.resume()
+    }
+}
+
 /// Standard flipped-coordinate document view so newly added bubbles append
 /// at the bottom rather than at the top.
 final class FlippedView: NSView {
@@ -2365,8 +2497,15 @@ final class AdaptiveTableLayerView: NSView {
 /// image/PDF full-size via Preview.app.
 final class ClickableImageView: NSImageView {
     var fileURL: URL?
+    /// Optional click handler — takes precedence over `fileURL` when set (used
+    /// by the image-gallery tiles to open a remote URL).
+    var onClick: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
+        if let onClick = onClick {
+            onClick()
+            return
+        }
         guard let url = fileURL else {
             super.mouseDown(with: event)
             return
