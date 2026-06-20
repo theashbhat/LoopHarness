@@ -12,8 +12,18 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 protocol MessageBoxDelegate: AnyObject {
-    func didSendMessageText(_ message: String)
+    /// `sttEngine` carries the engine label ("Deepgram STT"/"Apple STT") when
+    /// the text came from dictation, so the cell can show a transcription byline
+    /// under the bubble. `nil` for typed input.
+    func didSendMessageText(_ message: String, sttEngine: String?)
     func stopSpeech()
+}
+
+extension MessageBoxDelegate {
+    /// Convenience for the typed-input path — no STT engine to attribute.
+    func didSendMessageText(_ message: String) {
+        didSendMessageText(message, sttEngine: nil)
+    }
 }
 
 enum MessageBoxState {
@@ -67,7 +77,7 @@ class MessageBox: UIView {
     let recordingContainerView = UIView()
     let waveformView = UIView()
     let transcribingLabel = UILabel()
-    
+
     // Recording state
     var currentState: MessageBoxState = .normal
     var audioRecorder: AVAudioRecorder?
@@ -175,7 +185,7 @@ class MessageBox: UIView {
             attachmentChipView.addSubview(v)
         }
         
-        let recordingViews = [waveformView, transcribingLabel]
+        let recordingViews: [UIView] = [waveformView, transcribingLabel]
         for view in recordingViews {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.recordingContainerView.addSubview(view)
@@ -384,7 +394,7 @@ class MessageBox: UIView {
         transcribingLabel.textColor = .secondaryLabel
         transcribingLabel.font = UIFont.preferredFont(forTextStyle: .body)
         transcribingLabel.isHidden = true
-        
+
         emptyLabel.text = "Ask anything"
         emptyLabel.textColor = .secondaryLabel
         emptyLabel.font = UIFont.preferredFont(forTextStyle: .body)
@@ -623,6 +633,13 @@ class MessageBox: UIView {
         // floating over the recording container with the waveform between them.
         refreshInputButtons()
 
+        // Duck music synchronously BEFORE the earcon and state change so the
+        // earcon doesn't collide with a playing track. The notification-based
+        // duck in MusicController.handleVoiceLoopState fires asynchronously
+        // after the next run-loop tick; calling duckForVoiceSession() here
+        // ensures the pause lands first.
+        MusicController.shared.duckForVoiceSession()
+
         VoiceLoopCoordinator.shared.setState(.recording)
         EarconPlayer.shared.play(.listenStart)
 
@@ -737,8 +754,11 @@ class MessageBox: UIView {
             shouldTryDeepgram = (MessageBox.deepgramAPIKey != nil && MessageBox.isOnline)
         }
         if shouldTryDeepgram, beginStreamingRecording() {
+            VoiceLoopCoordinator.shared.setSTTEngine(.deepgram)
             return
         }
+
+        VoiceLoopCoordinator.shared.setSTTEngine(.apple)
 
         // Setup audio session to allow background audio to continue playing
         // and earcons to be audible.
@@ -1005,7 +1025,10 @@ class MessageBox: UIView {
                     print("Transcription successful: '\(transcribedText)'")
                     
                     if !transcribedText.isEmpty {
-                        self?.delegate?.didSendMessageText(transcribedText)
+                        self?.delegate?.didSendMessageText(
+                            transcribedText,
+                            sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.displayLabel
+                        )
                     } else {
                         print("Transcription returned empty string")
                     }
@@ -1559,6 +1582,7 @@ extension MessageBox {
     /// Used on Deepgram WS error or finalize timeout.
     fileprivate func fallbackToSFSpeechOnFailure() {
         guard isStreamingSTT else { return }
+        VoiceLoopCoordinator.shared.setSTTEngine(.apple)
 
         if let engine = audioEngine, engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
@@ -1608,7 +1632,10 @@ extension MessageBox {
         let final = text.trimmingCharacters(in: .whitespacesAndNewlines)
         teardownStreaming()
         if !final.isEmpty {
-            delegate?.didSendMessageText(final)
+            delegate?.didSendMessageText(
+                final,
+                sttEngine: VoiceLoopCoordinator.shared.activeSTTEngine?.displayLabel
+            )
         }
         returnToNormalState()
     }

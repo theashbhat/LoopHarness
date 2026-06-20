@@ -38,10 +38,15 @@ final class ImageSkill {
     static let shared = ImageSkill()
 
     static let systemPromptFragment: String = """
-You can generate images inline in chat using the generate_image tool.
+You can generate ORIGINAL, invented images inline in chat using the generate_image tool. This is an AI art generator (gpt-image), NOT a way to find real photos.
 
-When to call:
-- The user describes an image idea ("draw me…", "show me…", "mockup of…", "moodboard…").
+CRITICAL — generate_image is expensive. Do NOT use it to find or show real, existing things:
+- If the user wants to see real photos/pictures/images of an actual place, person, product, animal, event, or anything that exists in the world ("find me images of Ocean Beach", "show me photos of the Eiffel Tower", "what does a quokka look like"), use image_search instead. NEVER call generate_image for these.
+- Only use generate_image when the user wants something invented or artistic that does not exist yet: a drawing, mockup, concept art, logo, moodboard, wallpaper, or an explicit "generate/draw/paint/illustrate" request.
+- If you're unsure whether the user wants real photos or invented art, prefer image_search (it's far cheaper) or ask.
+
+When to call generate_image:
+- The user describes an invented image idea ("draw me…", "mockup of…", "moodboard…", "illustrate…").
 - The user asks to iterate on a previously-generated image ("make it darker", "same scene but cinematic", "remove the background"). In that case, look at the prior generate_image call's prompt and write a new full prompt that incorporates the change — do not pass a delta, the tool always takes a full prompt.
 
 Rules:

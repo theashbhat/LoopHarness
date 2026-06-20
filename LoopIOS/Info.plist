@@ -41,6 +41,24 @@
 	<string>$(OBSIDIAN_API_KEY)</string>
 	<key>OBSIDIAN_BASE_URL</key>
 	<string>$(OBSIDIAN_BASE_URL)</string>
+	<key>AGENT_MAIL_API_KEY</key>
+	<string>$(AGENT_MAIL_API_KEY)</string>
+	<key>AGENT_MAIL_INBOX</key>
+	<string>$(AGENT_MAIL_INBOX)</string>
+	<key>SSH_HOST</key>
+	<string>$(SSH_HOST)</string>
+	<key>SSH_PORT</key>
+	<string>$(SSH_PORT)</string>
+	<key>SSH_USERNAME</key>
+	<string>$(SSH_USERNAME)</string>
+	<key>SSH_NAME</key>
+	<string>$(SSH_NAME)</string>
+	<key>SSH_PRIVATE_KEY_B64</key>
+	<string>$(SSH_PRIVATE_KEY_B64)</string>
+	<key>SSH_PASSPHRASE</key>
+	<string>$(SSH_PASSPHRASE)</string>
+	<key>LOOP_FLAG</key>
+	<string>$(LOOP_FLAG)</string>
 	<key>NSUbiquitousContainers</key>
 	<dict>
 		<key>iCloud.com.bhat.intel</key>
@@ -120,6 +138,8 @@
 	<string>Loop does not write to Health. This key is present only because the HealthKit framework requires it; the app never requests write access.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Loop transcribes the voice messages you record so you can talk to the assistant. When you pick Apple in Settings ▸ Model ▸ STT, transcription happens entirely on this device.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Loop connects to machines on your local network and Tailscale (e.g. your Mac) over SSH so you can run a terminal and drive your loop runner.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.bhat.intel.scheduler.prefetch</string>

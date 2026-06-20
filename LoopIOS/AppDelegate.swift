@@ -47,6 +47,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // it likewise must run before this method returns.
         OpenClawMessagePoller.shared.bootstrap()
 
+        // VM cron poller — backstop catch-up for recurring VM agents whose
+        // completion push was missed.
+        VMCronPoller.shared.bootstrap()
+
         // APNs registration hooks (inert by default): only registers if the user
         // has already authorized notifications, so no new prompt. The VM-side
         // sender that would push on agent completion is not built yet.
@@ -106,7 +110,20 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
             // Bookkeeping — bounded jobs decrement, unbounded re-arm.
             BackgroundScheduler.shared.notificationDidFire(jobId: jobId)
         }
-        // Runner turn/job notifications — no bookkeeping needed, just display.
+
+        // A runner completion push that arrives while the app is foregrounded:
+        // reconcile the reply straight into its conversation and suppress the
+        // banner (it's now visible in the chat). Falls back to a banner if there's
+        // nothing to apply (e.g. couldn't reach the runner to fetch the turn).
+        if (userInfo["type"] as? String) == "runner_turn" {
+            Task {
+                let (_, reconciled) = await self.reconcileRunnerTurn(userInfo)
+                completionHandler(reconciled ? [] : [.banner, .sound, .list])
+            }
+            return
+        }
+
+        // Runner job notifications + everything else — just display.
         completionHandler([.banner, .sound, .list])
     }
 
@@ -131,8 +148,19 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
             return
         }
 
-        // Runner notifications — open the app; the turn id is in userInfo
-        // for future deep-linking. For now just foreground the app.
+        // Runner turn completion — reconcile the reply into its conversation and
+        // open it. Works cold (the app may have been killed before the push).
+        if (userInfo["type"] as? String) == "runner_turn" {
+            Task {
+                let (convId, _) = await self.reconcileRunnerTurn(userInfo)
+                if let convId {
+                    await MainActor.run { self.openPrefetchedConversation(id: convId) }
+                }
+            }
+            return
+        }
+
+        // Other runner notifications (jobs) — just foreground.
         if LoopRunnerPoller.isRunnerNotification(userInfo) {
             return
         }
@@ -156,13 +184,43 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         }
     }
 
+    // MARK: - Runner turn reconciliation
+
+    /// Resolve a completed runner turn into its conversation, exactly once.
+    /// Fetches the turn's final response (the push body is only a truncated
+    /// preview) and writes it via the deduped `RunnerTurnApplier`. Returns the
+    /// conversation id (for opening on tap) and whether the reply is now in the
+    /// chat (so a foreground push can suppress its redundant banner).
+    private func reconcileRunnerTurn(_ userInfo: [AnyHashable: Any]) async -> (conversationId: String?, reconciled: Bool) {
+        guard let turnId = userInfo["turn_id"] as? String else { return (nil, false) }
+        let convId = (userInfo["conversation_id"] as? String) ?? RunnerTurnApplier.conversationId(forTurn: turnId)
+
+        if RunnerTurnApplier.isApplied(turnId: turnId) {
+            return (convId, true)
+        }
+        // The one-shot delivers the reply text in the push payload (flattened to
+        // top-level userInfo by the backend) — no fetch needed.
+        guard let text = userInfo["text"] as? String, !text.isEmpty else {
+            return (convId, false)
+        }
+        let applied = RunnerTurnApplier.applyRunnerTurn(turnId: turnId, conversationId: convId, text: text)
+        return (convId, applied || RunnerTurnApplier.isApplied(turnId: turnId))
+    }
+
     // MARK: - Tap routing helpers
 
     private func openPrefetchedConversation(id: String) {
+        // Cold-start tap (app was killed when the cron/runner push is tapped):
+        // MessagingVC isn't in the window yet and/or the store hasn't hydrated,
+        // so both lookups below return nil. Stash the request so MessagingVC
+        // honors it once it's ready (viewDidLoad / store-ready drain).
         guard let messagingVC = Self.findMessagingVC(),
-              let conv = SimpleConversationManager.shared.getConversation(by: id) else { return }
+              let conv = SimpleConversationManager.shared.getConversation(by: id) else {
+            PendingConversationOpen.shared.set(id)
+            return
+        }
         DispatchQueue.main.async {
-            messagingVC.loadConversation(conv)
+            messagingVC.openConversationFromNotification(conv)
         }
     }
 

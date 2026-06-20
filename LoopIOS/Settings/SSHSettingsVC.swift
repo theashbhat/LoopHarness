@@ -55,6 +55,14 @@ final class SSHSettingsVC: UIViewController {
     private var editingConnection: SSHConfig
     private let isNew: Bool
 
+    /// Placeholder shown over the (empty) private-key text view.
+    private let keyPlaceholder = UILabel()
+    /// True when the edited connection already has a saved key — we show a masked
+    /// "saved" placeholder instead of the raw key and keep it unless replaced.
+    private var savedKeyPresent = false
+    /// True once the user has typed in the private-key field this session.
+    private var keyFieldEdited = false
+
     init(connection: SSHConfig?) {
         self.editingConnection = connection ?? SSHConfig()
         self.isNew = (connection == nil)
@@ -174,6 +182,20 @@ final class SSHSettingsVC: UIViewController {
             }
         }
 
+        // Placeholder overlay for the private-key text view (UITextView has none).
+        keyPlaceholder.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        keyPlaceholder.textColor = .placeholderText
+        keyPlaceholder.numberOfLines = 0
+        keyPlaceholder.isUserInteractionEnabled = false
+        keyPlaceholder.translatesAutoresizingMaskIntoConstraints = false
+        privateKeyView.addSubview(keyPlaceholder)
+        NSLayoutConstraint.activate([
+            keyPlaceholder.topAnchor.constraint(equalTo: privateKeyView.topAnchor, constant: 8),
+            keyPlaceholder.leadingAnchor.constraint(equalTo: privateKeyView.leadingAnchor, constant: 6),
+            keyPlaceholder.trailingAnchor.constraint(equalTo: privateKeyView.trailingAnchor, constant: -6),
+        ])
+        privateKeyView.delegate = self
+
         setupStatusRow()
 
         openTerminalButton.addTarget(self, action: #selector(openTerminalTapped), for: .touchUpInside)
@@ -244,8 +266,22 @@ final class SSHSettingsVC: UIViewController {
         hostField.text = cfg.host
         portField.text = cfg.port == 0 ? "22" : String(cfg.port)
         usernameField.text = cfg.username
-        privateKeyView.text = cfg.privateKey
         passphraseField.text = cfg.passphrase
+        // Never re-display the stored private key. If one is saved, show a masked
+        // "saved" placeholder; the field stays empty unless the user types a new
+        // key (which then replaces it).
+        savedKeyPresent = !cfg.privateKey.isEmpty
+        privateKeyView.text = ""
+        updateKeyPlaceholder()
+    }
+
+    private func updateKeyPlaceholder() {
+        keyPlaceholder.isHidden = !privateKeyView.text.isEmpty
+        if savedKeyPresent && !keyFieldEdited {
+            keyPlaceholder.text = "•••••••••••••• · saved\nTap to paste a new key (leave blank to keep)"
+        } else {
+            keyPlaceholder.text = "Private Key (PEM)"
+        }
     }
 
     /// Builds an `SSHConfig` from the current field values, preserving the
@@ -254,13 +290,17 @@ final class SSHSettingsVC: UIViewController {
         let port = Int(portField.text ?? "22") ?? 22
         let host = hostField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let name = nameField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let typedKey = privateKeyView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Keep the saved key when the field was left untouched; only overwrite
+        // when the user actually typed a new one.
+        let privateKey = (!keyFieldEdited && savedKeyPresent) ? editingConnection.privateKey : typedKey
         return SSHConfig(
             id: editingConnection.id,
             name: name.isEmpty ? host : name,
             host: host,
             port: port,
             username: usernameField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-            privateKey: privateKeyView.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            privateKey: privateKey,
             passphrase: passphraseField.text ?? ""
         )
     }
@@ -284,6 +324,19 @@ final class SSHSettingsVC: UIViewController {
             setStatus(.failed("Enter host, username, and private key to connect."))
             return
         }
+
+        // Confirm the private key actually landed in the keychain — surfaces a
+        // sync/keychain write failure immediately instead of a later empty field.
+        if !SSHConfigStore.shared.privateKeyPersists(id: config.id) {
+            let st = SSHConfigStore.shared.lastKeyWriteStatus
+            setStatus(.failed("Couldn't save the private key to the keychain (status \(st)). Try toggling iCloud Keychain, or report this code."))
+            return
+        }
+        // The key is saved; reflect that as the masked placeholder going forward.
+        savedKeyPresent = true
+        keyFieldEdited = false
+        privateKeyView.text = ""
+        updateKeyPlaceholder()
 
         setStatus(.checking)
         Task { @MainActor in
@@ -325,6 +378,8 @@ final class SSHSettingsVC: UIViewController {
     }
 
     private static func makeTextView(placeholder: String) -> UITextView {
+        // (placeholder param retained for call-site clarity; the overlay label
+        // in setupLayout provides the actual placeholder behavior.)
         let tv = UITextView()
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.layer.cornerRadius = 8
@@ -335,5 +390,12 @@ final class SSHSettingsVC: UIViewController {
         tv.autocorrectionType = .no
         tv.isSecureTextEntry = true
         return tv
+    }
+}
+
+extension SSHSettingsVC: UITextViewDelegate {
+    func textViewDidChange(_ textView: UITextView) {
+        if !textView.text.isEmpty { keyFieldEdited = true }
+        updateKeyPlaceholder()
     }
 }

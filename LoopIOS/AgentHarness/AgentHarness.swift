@@ -108,7 +108,9 @@ final class AgentHarness {
             ("Notion",           "Read and write Notion pages and databases", NotionSkill.tools),
             ("Slack",            "Read channels/DMs/mentions, search, and send messages with confirmation", SlackSkill.tools),
             ("Scheduler",        "Schedule reminders and recurring background tasks", SchedulerSkill.tools),
+            ("VM Agents",        "Recurring agents that run on your SSH VM on a cron schedule and push results", VMCronSkill.tools),
             ("Web Search",       "Search the web for up-to-date information", ExaSkill.tools),
+            ("Image Search",     "Search the web for real photos and render them inline as a gallery", SerpImageSearchSkill.tools),
             ("URL Fetch",        "Fetch and read a single web page (no API key)", URLFetchSkill.tools),
             ("Git",              "Clone, pull, and check status of git repositories", GitSkill.tools),
             ("GitHub",           "Review/merge/comment on PRs, open PRs and issues, browse repos and notifications", GitHubSkill.tools),
@@ -116,6 +118,7 @@ final class AgentHarness {
             ("File System",      "Browse and edit files in the workspace", FileSystemSkill.tools),
             ("Spec Builder",     "Draft execution specs from a goal", SpecBuilderSkill.tools),
             ("Location",         "Look up the device's current location", LocationSkill.tools + MapsSkill.tools),
+            ("Geocoding",        "Convert an address or place name to lat/lon coordinates", GeocodingSkill.tools),
             ("Image",            "Generate images from a text prompt", ImageSkill.tools),
             ("PDF",              "Generate a clean, page-aware PDF from a markdown document", PDFSkill.tools),
             ("Obsidian",         "Read and write the Obsidian vault", ObsidianSkill.tools),
@@ -128,9 +131,19 @@ final class AgentHarness {
             ("Devin",            "Dispatch coding tasks to Devin cloud agents (opens PRs, live transcript)", DevinSkill.tools),
             ("X (Twitter)",      "Post tweets to X (Twitter) with confirmation", TwitterSkill.tools),
             ("SSH",              "Execute shell commands on a remote host via SSH", SSHSkill.tools),
+            ("Google Drive",     "Search, read, and create files in Google Drive", GoogleDriveSkill.tools),
+            ("Google Gmail",     "Search, read, and send emails via Gmail", GoogleGmailSkill.tools),
+            ("Google Calendar",  "List and create events on Google Calendar (REST API)", GoogleCalendarSkill.tools),
+            ("Feed Cards",       "Generate visual feed cards (image or markdown poster)", CardSkill.tools),
         ]
         #if canImport(HealthKit) && os(iOS)
         catalog.append(("Apple Health", "Read-only access to steps, distance, workouts, heart rate, sleep, body mass", HealthSkill.tools))
+        #endif
+        #if os(iOS) || os(macOS)
+        catalog.append(("Stories", "Generate a 1080×1920 animated HTML story / infographic that renders as a tappable card", StorySkill.tools))
+        #endif
+        #if os(iOS)
+        catalog.append(("Browse", "Drive a real WebKit browser on-device to render and navigate JS-heavy pages, with a live preview card + scrubbable replay", BrowseSkill.tools))
         #endif
         return catalog
     }()
@@ -140,7 +153,9 @@ final class AgentHarness {
             NotionSkill.systemPromptFragment,
             SlackSkill.systemPromptFragment,
             SchedulerSkill.systemPromptFragment,
+            VMCronSkill.systemPromptFragment,
             ExaSkill.systemPromptFragment,
+            SerpImageSearchSkill.systemPromptFragment,
             URLFetchSkill.systemPromptFragment,
             GitSkill.systemPromptFragment,
             GitHubSkill.systemPromptFragment,
@@ -149,6 +164,7 @@ final class AgentHarness {
             SpecBuilderSkill.systemPromptFragment,
             LocationSkill.systemPromptFragment,
             MapsSkill.systemPromptFragment,
+            GeocodingSkill.systemPromptFragment,
             ImageSkill.systemPromptFragment,
             PDFSkill.systemPromptFragment,
             ObsidianSkill.systemPromptFragment,
@@ -162,9 +178,20 @@ final class AgentHarness {
             DevinSkill.systemPromptFragment,
             TwitterSkill.systemPromptFragment,
             SSHSkill.systemPromptFragment,
+            GoogleDriveSkill.systemPromptFragment,
+            GoogleGmailSkill.systemPromptFragment,
+            GoogleCalendarSkill.systemPromptFragment,
+            AgentMailSkill.systemPromptFragment,
+            CardSkill.systemPromptFragment,
         ]
         #if canImport(HealthKit) && os(iOS)
         fragments.append(HealthSkill.systemPromptFragment)
+        #endif
+        #if os(iOS) || os(macOS)
+        fragments.append(StorySkill.systemPromptFragment)
+        #endif
+        #if os(iOS)
+        fragments.append(BrowseSkill.systemPromptFragment)
         #endif
         self.toolsDoc = fragments.joined(separator: "\n\n")
         self.staticToolsDocLength = toolsDoc.count
@@ -321,6 +348,15 @@ final class AgentHarness {
         if !agents.isEmpty     { sections.append("# AGENTS\n\(agents)") }
         if !heartbeat.isEmpty  { sections.append("# HEARTBEAT\n\(heartbeat)") }
         if !toolsDoc.isEmpty   { sections.append(toolsDoc) }
+
+        // Layer 4 — anti-loop prompt injection. When the ToolCallGuard
+        // detects repeated tool calls, inject a strong system reminder
+        // telling the model to stop looping and use existing data.
+        if ToolCallGuard.shared.shouldInjectLoopReminder {
+            sections.append(ToolCallGuard.loopReminderPrompt)
+            ToolCallGuard.shared.consumeLoopReminder()
+        }
+
         return sections.joined(separator: "\n\n")
     }
 
@@ -394,6 +430,27 @@ final class AgentHarness {
         var rebuilt: [MessageStruct] = [MessageStruct(role: "system", content: composedSystem)]
         rebuilt.append(contentsOf: messages.filter { $0.role != "system" })
 
+        // Per-turn vision fallback. If this request will send a raw image but
+        // the selected model can't see images (e.g. GLM 5.2 on Fireworks),
+        // route just this request to a vision-capable model — preferring the
+        // same provider, so GLM 5.2 falls back to Kimi K2.6 on the same key.
+        // Only the image-bearing turn is rerouted: by the next turn the image
+        // has been replaced with its text summary (VisionSummaryService), so
+        // the selected model picks the conversation back up on its own.
+        let selected = ModelSelectionStore.current
+        var routeProvider = selected.provider
+        var modelIDOverride: String? = nil
+        var modelStampOverride: String? = nil
+        if !selected.supportsVision,
+           Self.turnSendsRawImage(rebuilt),
+           let fallback = ModelSelection.visionCapableFallback(preferring: selected.provider),
+           fallback != selected {
+            routeProvider = fallback.provider
+            modelIDOverride = fallback.apiModelID
+            modelStampOverride = fallback.stampedMessageModel
+            print("AgentHarness: \(selected.displayName) can't see images; routing this image turn to \(fallback.displayName)")
+        }
+
         // Hosted provider selected → talk straight to it with the user's own
         // key (Settings ▸ Keys). This deliberately bypasses the `Cloud`
         // backend: the open-source export ships `Cloud.url` as a placeholder,
@@ -403,18 +460,31 @@ final class AgentHarness {
         // fallback is exactly what made a missing key look like "the agent
         // ignores my model settings". Apple is opt-in via Settings ▸ Model
         // (handled by the `.apple` branch above).
-        switch ModelSelectionStore.current.provider {
+        switch routeProvider {
         case .anthropic:
-            AnthropicChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
+            AnthropicChat.shared.chat(messages: rebuilt, tools: toolsToSend, modelIDOverride: modelIDOverride, modelStampOverride: modelStampOverride, onPartial: onPartial, completion: completion)
         case .openAI:
-            OpenAIChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
+            OpenAIChat.shared.chat(messages: rebuilt, tools: toolsToSend, modelIDOverride: modelIDOverride, modelStampOverride: modelStampOverride, onPartial: onPartial, completion: completion)
         case .fireworks:
-            FireworksChat.shared.chat(messages: rebuilt, tools: toolsToSend, onPartial: onPartial, completion: completion)
+            FireworksChat.shared.chat(messages: rebuilt, tools: toolsToSend, modelIDOverride: modelIDOverride, modelStampOverride: modelStampOverride, onPartial: onPartial, completion: completion)
         case .apple:
             // Unreachable — `.apple` returned via offlineRespond above. Kept
             // so the switch stays exhaustive if providers are added.
             offlineRespond(messages: messages, completion: completion)
         }
+    }
+
+    /// True when this turn's context contains a ready image attachment that the
+    /// chat clients will send as a raw image block — i.e. it's the most recent
+    /// human turn, or it has no text description yet. Mirrors the downgrade
+    /// condition in `AnthropicChat.wirePayload` / `OpenAIChat.wireMessages`.
+    private static func turnSendsRawImage(_ messages: [MessageStruct]) -> Bool {
+        let lastUserId = messages.last { $0.role == "user" }?.id
+        for m in messages {
+            guard let f = m.fileAttachment, f.kind == .image, f.status == .ready else { continue }
+            if m.id == lastUserId || f.visionSummary == nil { return true }
+        }
+        return false
     }
 
     // MARK: - Offline path

@@ -232,8 +232,19 @@ final class LoopRunnerPoller {
     /// to the `curl`-over-SSH-exec client if the tunnel can't be established
     /// (e.g. `AllowTcpForwarding no`). Non-SSH runners use the direct URLSession
     /// client. Returns nil if the shared secret or URL is missing.
-    private func makeClient(for runner: RunnerConfig) async -> RunnerPolling? {
-        guard let secret = RunnerStore.shared.secret(for: runner.secretRef) else { return nil }
+    /// The runner used for the handoff + reconciliation paths: the loop-runner on
+    /// the active Settings → SSH connection (reached over the existing tunnel).
+    /// There's no separate "Loop Runner" to configure — the active SSH connection
+    /// IS the runner host. Empty when no SSH connection is set up.
+    private func effectiveRunners() -> [RunnerConfig] {
+        guard SSHConfigStore.shared.config.isConfigured else { return [] }
+        return [RunnerConfig.autoSSHRunner]
+    }
+
+    private func makeClient(for runner: RunnerConfig) async -> RunnerTransport? {
+        // No Keychain secret → empty bearer (the auto-SSH fallback runner runs
+        // with auth disabled behind the tunnel).
+        let secret = RunnerStore.shared.secret(for: runner.secretRef) ?? ""
         if let remotePort = runner.sshRemotePort {
             if let url = await SSHTunnelManager.shared.tunneledBaseURL(remotePort: remotePort) {
                 return LoopRunnerClient(baseURL: url, sharedSecret: secret)
@@ -242,6 +253,58 @@ final class LoopRunnerPoller {
         }
         guard let url = URL(string: runner.baseURL) else { return nil }
         return LoopRunnerClient(baseURL: url, sharedSecret: secret)
+    }
+
+    // MARK: - Background handoff (submit)
+
+    /// Hand an in-flight local turn off to a runner. Picks the most
+    /// recently-reachable configured runner, submits the messages as an async
+    /// turn, and returns the runner + new turn id on success (nil if there's no
+    /// runner or every submit attempt failed). The caller abandons the local
+    /// turn ONLY on a non-nil result, so a failed handoff never loses the reply.
+    /// Reason the last handoff submit failed, surfaced in the chat notice.
+    private(set) var lastHandoffError: String?
+
+    func submitHandoff(messages: [[String: String]], conversationId: String, userId: String) async -> (runner: RunnerConfig, turnId: String, model: String)? {
+        let sshConfig = SSHConfigStore.shared.config
+        guard sshConfig.isConfigured else {
+            lastHandoffError = "No SSH connection selected (Settings → SSH)."
+            Self.log.info("handoff: no active SSH connection")
+            return nil
+        }
+
+        // Self-contained one-shot over SSH — no deployed server needed.
+        let turnId = UUID().uuidString
+        let result = await BackgroundTurnRunner.shared.run(
+            messages: messages, conversationId: conversationId,
+            userId: userId, turnId: turnId, on: sshConfig)
+
+        switch result {
+        case .success(let model):
+            lastHandoffError = nil
+            return (RunnerConfig.autoSSHRunner, turnId, model)
+        case .failure(let reason):
+            lastHandoffError = reason
+            Self.log.error("handoff failed: \(reason, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Fetch a single turn for reconciliation (completion-push tap / foreground
+    /// push). Tries the preferred runner first (when the local notification
+    /// carries `runner_id`), then any other configured runner — the remote
+    /// completion push has no runner_id, so we may have to probe.
+    func fetchTurn(turnId: String, preferredRunnerId: String?) async -> RunnerTurn? {
+        var runners = effectiveRunners()
+        if let preferredRunnerId, let idx = runners.firstIndex(where: { $0.id == preferredRunnerId }) {
+            let r = runners.remove(at: idx)
+            runners.insert(r, at: 0)
+        }
+        for runner in runners {
+            guard let client = await makeClient(for: runner) else { continue }
+            if let turn = try? await client.getTurn(id: turnId) { return turn }
+        }
+        return nil
     }
 
     private func pollRunner(_ runner: RunnerConfig) async {
@@ -286,6 +349,15 @@ final class LoopRunnerPoller {
         let isNew = notifiedTurnIds.insert(turn.id).inserted
         lock.unlock()
         guard isNew else { return }
+
+        // Handoff turn: reconcile the reply straight into its conversation. If we
+        // applied it, the reply is already in the chat — skip the banner. Returns
+        // false for interactive turns (no conversation) and duplicates, which
+        // fall through to the normal notification below.
+        if let text = turn.finalResponse, !text.isEmpty,
+           RunnerTurnApplier.applyRunnerTurn(turnId: turn.id, conversationId: turn.conversationId, text: text) {
+            return
+        }
 
         let content = UNMutableNotificationContent()
         content.title = "Loop · \(runner.nickname)"

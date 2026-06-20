@@ -91,6 +91,7 @@ struct ToolRouter {
             "website", "browse", "fetch",
         ], toolNames: [
             "exa_search", "exa_get_contents", "exa_list_websets", "fetch_url",
+            "image_search",
         ]),
         SkillGroup(name: "health", keywords: [
             "health", "steps", "workout", "heart rate", "sleep",
@@ -115,14 +116,34 @@ struct ToolRouter {
         ]),
         SkillGroup(name: "image", keywords: [
             "image", "picture", "photo", "generate image", "draw",
-            "illustration", "dalle", "dall-e",
+            "illustration", "dalle", "dall-e", "find image", "find me image",
+            "show me", "real photo", "pics", "pictures of", "photos of",
         ], toolNames: [
+            // Both the web image search and the AI generator are surfaced for
+            // any image-ish request. The system prompt steers the model to
+            // prefer image_search for real/existing subjects (cheap) and only
+            // use generate_image for invented art (expensive).
+            "image_search",
             "generate_image",
         ]),
         SkillGroup(name: "pdf", keywords: [
             "pdf", "document", "export pdf",
         ], toolNames: [
             "generate_pdf",
+        ]),
+        SkillGroup(name: "story", keywords: [
+            "story", "stories", "recap", "infographic", "summary card",
+            "visual summary", "wrapped", "highlight reel",
+        ], toolNames: [
+            "generate_story",
+        ]),
+        SkillGroup(name: "browse", keywords: [
+            "browse", "open the", "go to", "visit", "navigate to", "website",
+            "web page", "webpage", "homepage", "home page", "render",
+            "what's on", "whats on", "check the", "look at the page",
+            "load the", "the site", "click through", "screenshot the",
+        ], toolNames: [
+            "browse",
         ]),
         SkillGroup(name: "twitter", keywords: [
             "tweet", "twitter", "x.com", "post tweet",
@@ -149,6 +170,18 @@ struct ToolRouter {
         ], toolNames: [
             "muni_arrivals",
         ]),
+        SkillGroup(name: "email", keywords: [
+            "email", "e-mail", "mail", "send it to", "send this to",
+            "inbox", "gmail", "agentmail", "send me",
+        ], toolNames: [
+            "agent_mail", "google_gmail",
+        ]),
+        SkillGroup(name: "card", keywords: [
+            "card", "feed", "generate a card", "summary card",
+            "recap", "visual card", "poster",
+        ], toolNames: [
+            "generate_card",
+        ]),
     ]
 
     /// Tools always included regardless of message content. These are needed
@@ -166,6 +199,8 @@ struct ToolRouter {
         // Scheduler
         "schedule_task", "schedule_cron", "list_tasks", "list_crons",
         "delete_task", "delete_cron", "run_task_now",
+        // VM cron agents (recurring jobs on the SSH VM)
+        "schedule_vm_agent", "list_vm_agents", "delete_vm_agent",
         // Integration
         "list_integrations", "connect_integration", "set_api_key",
         "list_api_keys", "open_integration_settings",
@@ -175,6 +210,11 @@ struct ToolRouter {
         "save_skill", "list_skills", "delete_skill",
         // Spec builder
         "publish_spec_to_notion",
+        // Browse — the internal per-step action tool used by BrowseSession's
+        // nested model loop. Kept here so tool-routing on those nested calls
+        // never strips it (the page-state observations would otherwise match
+        // an unrelated skill group and filter browse_action out).
+        "browse_action",
     ]
 
     // MARK: - Selection

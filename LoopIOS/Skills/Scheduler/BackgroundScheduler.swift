@@ -466,6 +466,10 @@ final class BackgroundScheduler {
                 completion(false)
             case .notDetermined:
                 self.center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                    // Obtain & register the APNs token now that we're authorized.
+                    if granted {
+                        PushRegistration.shared.registerIfAuthorized()
+                    }
                     completion(granted)
                 }
             @unknown default:
@@ -554,6 +558,10 @@ final class BackgroundScheduler {
                 completion: @escaping (RunResult) -> Void) {
         let startedAt = Date()
         isRunningHeadless = true
+
+        // Fresh scheduled job — reset the anti-loop guard so prior state
+        // from interactive use doesn't falsely flag this run's tool calls.
+        ToolCallGuard.shared.resetForNewTurn()
 
         // Fresh conversation so the user can scroll back to past briefings via
         // the normal conversation list. Title doubles as the notification's

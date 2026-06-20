@@ -15,6 +15,7 @@
 		DA17C13000000000000000B5 /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = DA17C13000000000000000A5 /* NIOSSH */; };
 		DA17C13000000000000000B6 /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = DA17C13000000000000000A6 /* NIOSSH */; };
 		DA17C14000000000000000D4 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = DA17C14000000000000000C4 /* SwiftTerm */; };
+		DA17C15000000000000000F5 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = DA17C15000000000000000E5 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -75,6 +76,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				AppIntents/AskLoopIntent.swift,
+				AppIntents/CaptureToLoopIntent.swift,
 				Assets.xcassets,
 				HelperViews/AvatarView.swift,
 				HelperViews/ShimmerLabel.swift,
@@ -82,10 +85,13 @@
 				Info.plist,
 				LifeView/LifeView.swift,
 				MainVC.swift,
+				Markdown/MarkdownShareToolbar.swift,
 				MarkdownEditorViewController.swift,
 				MessageBox.swift,
 				MessagingCell.swift,
 				MessagingVC.swift,
+				MusicMiniPlayer/MusicMiniPlayerView.swift,
+				MusicMiniPlayer/TopBannerScrollView.swift,
 				Onboarding/ActionButtonReminderBarView.swift,
 				Onboarding/OnboardingCardView.swift,
 				Onboarding/OnboardingViewController.swift,
@@ -122,16 +128,21 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				AppIntents/AskLoopIntent.swift,
+				AppIntents/CaptureToLoopIntent.swift,
 				HelperViews/AvatarView.swift,
 				HelperViews/ShimmerLabel.swift,
 				ImageViewerVC.swift,
 				Info.plist,
 				LifeView/LifeView.swift,
 				MainVC.swift,
+				Markdown/MarkdownShareToolbar.swift,
 				MarkdownEditorViewController.swift,
 				MessageBox.swift,
 				MessagingCell.swift,
 				MessagingVC.swift,
+				MusicMiniPlayer/MusicMiniPlayerView.swift,
+				MusicMiniPlayer/TopBannerScrollView.swift,
 				Onboarding/ActionButtonReminderBarView.swift,
 				Onboarding/OnboardingCardView.swift,
 				Onboarding/OnboardingViewController.swift,
@@ -218,6 +229,7 @@
 			files = (
 				DA17C12F00000000000000F3 /* SwiftGitX in Frameworks */,
 				DA17C13000000000000000B5 /* NIOSSH in Frameworks */,
+				DA17C15000000000000000F5 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -328,6 +340,7 @@
 			packageProductDependencies = (
 				DA17C12F00000000000000F5 /* SwiftGitX */,
 				DA17C13000000000000000A5 /* NIOSSH */,
+				DA17C15000000000000000E5 /* Sparkle */,
 			);
 			productName = LoopMac;
 			productReference = 6B00010100000000DEADBEEF /* LoopMac.app */;
@@ -395,6 +408,7 @@
 				DA17C12F00000000000000F1 /* XCRemoteSwiftPackageReference "SwiftGitX" */,
 				DA17C13000000000000000A1 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */,
 				DA17C14000000000000000C1 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				DA17C15000000000000000E1 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 6A0903842CD69D9500E70D46 /* Products */;
@@ -988,6 +1002,14 @@
 				minimumVersion = 1.13.0;
 			};
 		};
+		DA17C15000000000000000E1 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1025,6 +1047,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DA17C14000000000000000C1 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		DA17C15000000000000000E5 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DA17C15000000000000000E1 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

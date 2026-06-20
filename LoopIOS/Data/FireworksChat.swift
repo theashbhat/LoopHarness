@@ -59,6 +59,8 @@ final class FireworksChat {
 
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              modelIDOverride: String? = nil,
+              modelStampOverride: String? = nil,
               onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
@@ -69,7 +71,10 @@ final class FireworksChat {
             return
         }
 
-        let modelID = ModelSelectionStore.current.apiModelID ?? "accounts/fireworks/models/kimi-k2p6"
+        // `modelIDOverride` lets a caller pin a specific Fireworks model
+        // regardless of the user's selection — used by the per-turn vision
+        // fallback (e.g. GLM 5.2 → Kimi K2.6 for an image turn).
+        let modelID = modelIDOverride ?? ModelSelectionStore.current.apiModelID ?? "accounts/fireworks/models/kimi-k2p6"
 
         var body: [String: Any] = [
             "model": modelID,
@@ -107,7 +112,7 @@ final class FireworksChat {
                 let msg = MessageStruct(
                     role: "assistant",
                     content: r.content,
-                    model: ModelSelectionStore.current.stampedMessageModel,
+                    model: modelStampOverride ?? ModelSelectionStore.current.stampedMessageModel,
                     functions: r.toolCalls,
                     reasoningContent: r.reasoningContent,
                     tokenUsage: r.usage,
@@ -120,6 +125,7 @@ final class FireworksChat {
 
         let task = streamingSession.dataTask(with: req)
         streamingSessionDelegate.register(task: task, reader: reader)
+        LocalInferenceController.shared.track(task)
         task.resume()
     }
 

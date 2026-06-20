@@ -138,6 +138,9 @@ final class OnboardingCoordinator {
         static let voiceOpenAI       = "tts.openai"
         static let skipTTS           = "tts.skip"
         static let startChatting     = "done.start"
+        /// Managed onboarding: one chip per ElevenLabs voice. The voice id is
+        /// appended after this prefix so `handleChoice` can recover it.
+        static let managedVoicePrefix = "tts.voice."
     }
 
     private(set) var currentStep: StepID = .greeting
@@ -190,7 +193,13 @@ final class OnboardingCoordinator {
         if hasResumed { return }
         hasResumed = true
 
-        let resumed = StepID(rawValue: OnboardingState.lastStep) ?? .greeting
+        var resumed = StepID(rawValue: OnboardingState.lastStep) ?? .greeting
+        // Managed builds run a trimmed 3-step script (voice → Action Button →
+        // intro): the model/key/integrations steps don't apply, so never
+        // resume earlier than the voice step.
+        if AppFlags.isManaged, resumed.rawValue < StepID.ttsOffer.rawValue {
+            resumed = .ttsOffer
+        }
         currentStep = resumed
 
         // First launch: seed the self-docs and pick a sensible starting
@@ -198,13 +207,20 @@ final class OnboardingCoordinator {
         // Secrets.xcconfig, iCloud-KVS sync), let `ModelSelectionStore`'s
         // default logic pick that provider — pinning Apple would hide a
         // working key and make the greeting inaccurate. Pin Apple only when
-        // no hosted key exists.
-        if resumed == .greeting {
+        // no hosted key exists. (Managed builds skip model setup entirely.)
+        let isFreshStart = resumed == .greeting || (AppFlags.isManaged && resumed == .ttsOffer)
+        if isFreshStart {
             AppSignals.emit("onboarding_started")
-            if !ModelProvider.hasAnyProviderKey {
+            if !AppFlags.isManaged, !ModelProvider.hasAnyProviderKey {
                 pinAppleFoundationModel()
             }
             AgentHarness.shared.seedSelfDocsIfMissing()
+            // Managed: keep audio muted through the voice-picker prompt so
+            // message 1 isn't spoken. Selecting a voice unmutes, so messages
+            // 2 and 3 read aloud in the chosen voice.
+            if AppFlags.isManaged {
+                iCloudKVSDefaults.shared.set(true, forKey: "audioMuted")
+            }
             if deferGreetingUntilFirstMessage {
                 // Host wants the greeting to land as a *reply* to the user's
                 // opener, so hold the post. `handleUserText` will fire it
@@ -408,6 +424,17 @@ final class OnboardingCoordinator {
     }
 
     private func handleChoice(id: String, label: String) {
+        // Managed onboarding: the voice-picker chips each carry an ElevenLabs
+        // voice id. Persist the pick (TTS is locked to ElevenLabs Flash v2.5)
+        // and move on to the Action Button step.
+        if AppFlags.isManaged, currentStep == .ttsOffer,
+           id.hasPrefix(ChipId.managedVoicePrefix) {
+            commitAnswer(echo: label)
+            selectElevenLabsVoice(String(id.dropFirst(ChipId.managedVoicePrefix.count)))
+            advance(to: .actionButton)
+            return
+        }
+
         switch (currentStep, id) {
 
         // Model picks fire from .greeting now (the first step). .modelChoice
@@ -707,6 +734,27 @@ final class OnboardingCoordinator {
                 ]))
 
         case .ttsOffer:
+            // Managed builds open here (step 1 of 3) and pick directly from
+            // the ElevenLabs voice list — TTS is locked to ElevenLabs Flash
+            // v2.5, so we offer voices rather than providers.
+            if AppFlags.isManaged {
+                // Curated shortlist, in display order. Resolved against the
+                // provider's `voiceOptions` so labels/ids stay in sync.
+                let orderedVoiceIds = [
+                    "ZSNL4hPqCnqoMPaI4jGX", // Hannah
+                    "sIivXWc5MTlPIP3kJXhg", // Hayes
+                    "M6ic45wruJGWAxLFEMNK", // Zoe
+                    "hmMWXCj9K7N5mCPcRkfC", // Rory
+                ]
+                let options = TTSProvider.elevenLabsFlashV25.voiceOptions
+                let voiceChips: [OnboardingChoiceOption] = orderedVoiceIds.compactMap { id in
+                    guard let opt = options.first(where: { $0.id == id }) else { return nil }
+                    return OnboardingChoiceOption(id: ChipId.managedVoicePrefix + opt.id, label: opt.label)
+                }
+                return assistantMessage(
+                    text: "Nice to meet you! **Let's get set up with this Harness.**\n\n**Pick a voice** for replies. You can change it anytime from the speaker menu.",
+                    card: .suggestions(options: voiceChips))
+            }
             return assistantMessage(
                 text: "**Pick a voice** for replies. You can change it anytime from the speaker menu.",
                 card: .suggestions(options: [
@@ -718,15 +766,27 @@ final class OnboardingCoordinator {
                 ]))
 
         case .actionButton:
+            // Managed onboarding uses its own lead-in; both keep the Action
+            // Button bold and the same walkthrough card.
+            let actionButtonText = AppFlags.isManaged
+                ? "Let's bind your iPhone's **Action Button** so you can talk to me from anywhere."
+                : "One last thing — bind your iPhone's **Action Button** so you can talk to me from anywhere."
             return assistantMessage(
-                text: "One last thing — bind your iPhone's **Action Button** so you can talk to me from anywhere.",
+                text: actionButtonText,
                 card: .actionButtonWalkthrough)
 
         case .done:
-            // Terminal message. We no longer ask the user to name the
-            // assistant, so this is the single sign-off that hands the
-            // conversation over to the real chat. No chip — the message bar
-            // is the obvious next step.
+            // Terminal message. Managed builds close with Loop's self-intro
+            // and an open question; the typed answer becomes the user's first
+            // real message (and seeds what the harness knows about them).
+            if AppFlags.isManaged {
+                return assistantMessage(
+                    text: "**Awesome. We're all set!** To introduce myself — I'm **Loop**, designed to be your personal self-improving agent.\n\nThink of me as a living memory you can text or talk to: I remember your projects, manage your calendar, search the web, draft documents, and run tasks in the background — all from one conversation that syncs across your devices. The more we work together, the sharper I get.\n\n**What should I know about you to be most useful?**",
+                    card: .answered)
+            }
+            // We no longer ask the user to name the assistant, so this is the
+            // single sign-off that hands the conversation over to the real
+            // chat. No chip — the message bar is the obvious next step.
             return assistantMessage(
                 text: "Awesome. We're all set! I'm excited to be at your service. **How can I be helpful?**",
                 card: .answered)
@@ -749,6 +809,17 @@ final class OnboardingCoordinator {
     /// helper independent of the enum's definition in MessagingVC.
     private func selectVoiceProvider(_ rawValue: String) {
         iCloudKVSDefaults.shared.set(rawValue, forKey: "ttsProvider")
+        iCloudKVSDefaults.shared.set(false, forKey: "audioMuted")
+    }
+
+    /// Managed onboarding voice pick. TTS is locked to ElevenLabs Flash v2.5
+    /// (see `MessagingVC.ttsProvider`), so we persist the chosen voice id
+    /// against that provider's key and unmute. Writing `ttsProvider` too keeps
+    /// the stored value coherent even though the managed getter ignores it.
+    private func selectElevenLabsVoice(_ voiceId: String) {
+        let provider = TTSProvider.elevenLabsFlashV25
+        iCloudKVSDefaults.shared.set(provider.rawValue, forKey: "ttsProvider")
+        iCloudKVSDefaults.shared.set(voiceId, forKey: "ttsVoice.\(provider.rawValue)")
         iCloudKVSDefaults.shared.set(false, forKey: "audioMuted")
     }
 

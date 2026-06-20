@@ -336,6 +336,24 @@ final class AgentLargeView: UIView {
         tickerMask.frame = tickerContainer.bounds
     }
 
+    /// Toggle everything except the backdrop and the orb. Used by the present
+    /// transition to hold the labels/pill/ticker back until the orb has flown
+    /// into place — otherwise the chrome lands at full opacity before the orb
+    /// arrives, which reads as the labels "showing up early." The orb itself
+    /// is driven separately by `AvatarPopAnimator`.
+    func setChromeHidden(_ hidden: Bool, animated: Bool) {
+        let chrome: [UIView] = [
+            statusLabel, dismissHint, muteButton,
+            voicePill, tickerContainer, subAgentScroll,
+        ]
+        let apply = { chrome.forEach { $0.alpha = hidden ? 0 : 1 } }
+        if animated {
+            UIView.animate(withDuration: 0.25, animations: apply)
+        } else {
+            apply()
+        }
+    }
+
     // MARK: - Voice pill
 
     /// Pump the current voice coordinator state + held flag into the pill's

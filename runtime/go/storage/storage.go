@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,6 +26,13 @@ type Turn struct {
 	MessagesJSON  json.RawMessage `json:"messages_json"`
 	FinalResponse string          `json:"final_response"`
 	Error         string          `json:"error,omitempty"`
+	// UserID / ConversationID identify the device + chat that a turn belongs
+	// to. They are only populated for async (handoff) turns — interactive SSE
+	// turns leave them empty. UserID lets the completion path push back to the
+	// originating device; ConversationID lets the client reconcile the reply
+	// into the right conversation.
+	UserID         string `json:"user_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 type Job struct {
@@ -85,19 +93,34 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_turns_updated_at ON turns(updated_at);
 	CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at);
 	`
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Additive column migrations for already-deployed DBs. CREATE TABLE IF NOT
+	// EXISTS above never alters an existing table, so new columns must be added
+	// explicitly. SQLite has no "ADD COLUMN IF NOT EXISTS", so we tolerate the
+	// "duplicate column name" error to keep this idempotent.
+	for _, stmt := range []string{
+		"ALTER TABLE turns ADD COLUMN user_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE turns ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) CreateTurn(id string, messagesJSON json.RawMessage) error {
+func (s *Store) CreateTurn(id string, messagesJSON json.RawMessage, userID, conversationID string) error {
 	now := time.Now().UTC().Format(tsFormat)
 	_, err := s.db.Exec(
-		"INSERT INTO turns (id, created_at, updated_at, status, messages_json) VALUES (?, ?, ?, 'running', ?)",
-		id, now, now, string(messagesJSON),
+		"INSERT INTO turns (id, created_at, updated_at, status, messages_json, user_id, conversation_id) VALUES (?, ?, ?, 'running', ?, ?, ?)",
+		id, now, now, string(messagesJSON), userID, conversationID,
 	)
 	return err
 }
@@ -115,10 +138,10 @@ func (s *Store) CompleteTurn(id, finalResponse, errMsg string) error {
 }
 
 func (s *Store) GetTurn(id string) (*Turn, error) {
-	row := s.db.QueryRow("SELECT id, created_at, updated_at, status, messages_json, final_response, error FROM turns WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, created_at, updated_at, status, messages_json, final_response, error, user_id, conversation_id FROM turns WHERE id = ?", id)
 	var t Turn
 	var createdStr, updatedStr, messagesStr string
-	if err := row.Scan(&t.ID, &createdStr, &updatedStr, &t.Status, &messagesStr, &t.FinalResponse, &t.Error); err != nil {
+	if err := row.Scan(&t.ID, &createdStr, &updatedStr, &t.Status, &messagesStr, &t.FinalResponse, &t.Error, &t.UserID, &t.ConversationID); err != nil {
 		return nil, fmt.Errorf("turn not found: %w", err)
 	}
 	t.CreatedAt, _ = time.Parse(tsFormat, createdStr)
@@ -180,7 +203,7 @@ func (s *Store) GetJob(jobID string) (*Job, error) {
 // ListTurns returns turns optionally filtered by since time and status,
 // ordered by updated_at descending, capped at limit.
 func (s *Store) ListTurns(since *time.Time, status string, limit int) ([]Turn, error) {
-	query := "SELECT id, created_at, updated_at, status, final_response, error FROM turns WHERE 1=1"
+	query := "SELECT id, created_at, updated_at, status, final_response, error, conversation_id FROM turns WHERE 1=1"
 	var args []interface{}
 	if since != nil {
 		query += " AND updated_at > ?"
@@ -203,7 +226,7 @@ func (s *Store) ListTurns(since *time.Time, status string, limit int) ([]Turn, e
 	for rows.Next() {
 		var t Turn
 		var createdStr, updatedStr string
-		if err := rows.Scan(&t.ID, &createdStr, &updatedStr, &t.Status, &t.FinalResponse, &t.Error); err != nil {
+		if err := rows.Scan(&t.ID, &createdStr, &updatedStr, &t.Status, &t.FinalResponse, &t.Error, &t.ConversationID); err != nil {
 			return nil, fmt.Errorf("scanning turn: %w", err)
 		}
 		t.CreatedAt, _ = time.Parse(tsFormat, createdStr)

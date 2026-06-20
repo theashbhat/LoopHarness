@@ -75,6 +75,7 @@ final class MarkdownEditorViewController: UIViewController {
 
     private let textView = UITextView()
     private let activityIndicator = UIActivityIndicatorView(style: .large)
+    private let shareToolbar = MarkdownShareToolbar()
     private lazy var saveButton = UIBarButtonItem(
         barButtonSystemItem: .save, target: self, action: #selector(saveTapped))
 
@@ -97,6 +98,9 @@ final class MarkdownEditorViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         configureNavigationItem()
+        // Toolbar must be in the view hierarchy before configureTextView()
+        // constrains the text view's bottom to shareToolbar.topAnchor.
+        configureShareToolbar()
         configureTextView()
         configureActivityIndicator()
         observeKeyboard()
@@ -145,8 +149,30 @@ final class MarkdownEditorViewController: UIViewController {
             textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             textView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             textView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            textView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            textView.bottomAnchor.constraint(equalTo: shareToolbar.topAnchor),
         ])
+    }
+
+    private func configureShareToolbar() {
+        shareToolbar.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(shareToolbar)
+        NSLayoutConstraint.activate([
+            shareToolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            shareToolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            shareToolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+        ])
+        shareToolbar.onShare = { [weak self] in
+            self?.shareMarkdownText()
+        }
+    }
+
+    private func shareMarkdownText() {
+        guard isLoaded else { return }
+        let text = textView.text ?? ""
+        let vc = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        vc.popoverPresentationController?.sourceView = shareToolbar
+        vc.popoverPresentationController?.sourceRect = shareToolbar.shareButtonFrame
+        present(vc, animated: true)
     }
 
     private func configureActivityIndicator() {
@@ -316,7 +342,8 @@ final class MarkdownEditorViewController: UIViewController {
     @objc private func keyboardWillChange(_ note: Notification) {
         guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
         let overlap = max(0, view.bounds.maxY - view.convert(frame, from: nil).minY)
-        let inset = max(0, overlap - view.safeAreaInsets.bottom)
+        let toolbarHeight = shareToolbar.bounds.height
+        let inset = max(0, overlap - view.safeAreaInsets.bottom - toolbarHeight)
         textView.contentInset.bottom = inset
         textView.verticalScrollIndicatorInsets.bottom = inset
     }

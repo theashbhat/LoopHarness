@@ -392,6 +392,9 @@ enum SubAgentRuntime {
         if let s = ObsidianSkill.shared.statusText(for: call) { return s }
         if let s = CalendarSkill.shared.statusText(for: call) { return s }
         if let s = SSHSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleDriveSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleGmailSkill.shared.statusText(for: call) { return s }
+        if let s = GoogleCalendarSkill.shared.statusText(for: call) { return s }
         return nil
     }
 

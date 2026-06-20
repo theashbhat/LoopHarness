@@ -63,6 +63,30 @@ final class LoopRunnerSSHClient {
         return try LoopRunnerClient.jsonDecoder.decode(RunnerHealthResponse.self, from: data)
     }
 
+    func getTurn(id: String) async throws -> RunnerTurn {
+        let data = try await get(path: "/turn/\(id)", authed: true, timeout: 15)
+        return try LoopRunnerClient.jsonDecoder.decode(RunnerTurn.self, from: data)
+    }
+
+    /// Submit a turn over SSH (handoff path). POSTs the same JSON the URLSession
+    /// client sends; with `async: true` the runner replies `202 {"id":...}`.
+    func startTurn(messages: [[String: String]], conversationId: String, userId: String, async: Bool = true) async throws -> String {
+        let payload: [String: Any] = [
+            "messages": messages,
+            "conversation_id": conversationId,
+            "user_id": userId,
+            "async": async,
+        ]
+        let bodyData = try JSONSerialization.data(withJSONObject: payload)
+        let bodyStr = String(data: bodyData, encoding: .utf8) ?? "{}"
+        let data = try await post(path: "/turn", jsonBody: bodyStr, timeout: 20)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let turnId = obj?["id"] as? String else {
+            throw RunnerError.invalidResponse
+        }
+        return turnId
+    }
+
     // MARK: - Internals
 
     /// Runs a single GET over SSH via curl and returns the response body. Uses
@@ -106,6 +130,42 @@ final class LoopRunnerSSHClient {
         return Data(body.utf8)
     }
 
+    /// Runs a single POST over SSH via curl with a JSON body and returns the
+    /// response body. Same status-on-last-line trick as `get`.
+    private func post(path: String, jsonBody: String, timeout: Int) async throws -> Data {
+        let url = "http://127.0.0.1:\(remotePort)\(path)"
+        var cmd = "curl -s -m \(timeout) -w '\\n%{http_code}' -X POST"
+        cmd += " -H " + Self.shellQuote("Authorization: Bearer \(sharedSecret)")
+        cmd += " -H " + Self.shellQuote("Content-Type: application/json")
+        cmd += " -d " + Self.shellQuote(jsonBody)
+        cmd += " " + Self.shellQuote(url)
+
+        let res = try await SSHSkill.shared.runCommand(cmd, timeout: Double(timeout + 5))
+        if res.exitCode != 0 {
+            let detail = res.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RunnerError.transport(
+                "curl POST over SSH failed (exit \(res.exitCode))" + (detail.isEmpty ? "" : ": \(detail)"))
+        }
+
+        let out = res.stdout
+        guard let nl = out.lastIndex(of: "\n") else {
+            throw RunnerError.transport("empty response from runner over SSH")
+        }
+        let codeStr = out[out.index(after: nl)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = String(out[..<nl])
+        guard let code = Int(codeStr) else {
+            throw RunnerError.transport("could not parse HTTP status from runner response")
+        }
+        if codeStr == "000" {
+            throw RunnerError.transport(
+                "could not reach runner on 127.0.0.1:\(remotePort) over SSH — is it running?")
+        }
+        guard (200..<300).contains(code) else {
+            throw RunnerError.httpError(statusCode: code)
+        }
+        return Data(body.utf8)
+    }
+
     /// POSIX single-quote escaping so secrets/URLs can't break out of the
     /// remote shell command.
     private static func shellQuote(_ s: String) -> String {
@@ -114,3 +174,6 @@ final class LoopRunnerSSHClient {
 }
 
 extension LoopRunnerSSHClient: RunnerPolling {}
+extension LoopRunnerSSHClient: RunnerSubmitting {}
+extension LoopRunnerSSHClient: RunnerFetching {}
+extension LoopRunnerSSHClient: RunnerTransport {}

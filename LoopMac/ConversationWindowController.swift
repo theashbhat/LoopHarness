@@ -84,6 +84,15 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
     private(set) var pdfAttachments: [String: PDFAttachment] = [:]
     private static let pdfMessageIdPrefix = "pdf-"
 
+    /// Story plumbing, parallel to image/PDF. Placeholder message persisted
+    /// under id `story-<attachmentId>`; the live attachment (with its rendered
+    /// HTML file URL) lives in `storyAttachments` so a tab switch / reload can
+    /// re-render the card. `storyPlayer` retains the open full-screen player.
+    private var storyBubbles: [String: StoryBubbleView] = [:]
+    private(set) var storyAttachments: [String: StoryAttachment] = [:]
+    private static let storyMessageIdPrefix = "story-"
+    private var storyPlayer: StoryPlayerWindowController?
+
     /// The markdown editor currently slid up over the chat pane, if any, plus
     /// the top constraint we animate to drive the vertical slide.
     private var markdownEditorVC: MarkdownEditorViewController?
@@ -198,6 +207,20 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             name: .voiceLoopStateDidChange,
             object: nil
         )
+        // Drop our retained story player when its window closes so it (and the
+        // WKWebView) deallocate.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(storyPlayerDidClose(_:)),
+            name: .storyPlayerDidClose,
+            object: nil
+        )
+    }
+
+    @objc private func storyPlayerDidClose(_ note: Notification) {
+        if let closed = note.object as? StoryPlayerWindowController, closed === storyPlayer {
+            storyPlayer = nil
+        }
     }
 
     deinit {
@@ -871,6 +894,7 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         // map survives so we can re-render their state below.
         imageBubbles.removeAll()
         pdfBubbles.removeAll()
+        storyBubbles.removeAll()
         lastRebuiltMessages = messages
         let manager = SimpleConversationManager.shared
         for (messageIndex, message) in messages.enumerated() {
@@ -882,6 +906,8 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                 let m = manager.messageStruct(from: message)
                 if let mapAttachment = m.mapAttachment {
                     stack.addArrangedSubview(makeMapRow(bubbleView: MapBubbleView(attachment: mapAttachment)))
+                } else if let gallery = m.imageGalleryAttachment {
+                    stack.addArrangedSubview(makeImageGalleryRow(bubbleView: ImageGalleryBubbleView(attachment: gallery)))
                 } else if let fileAttachment = m.fileAttachment {
                     // role="assistant" routes the existing bubble factory
                     // to the assistant-side alignment (leading edge,
@@ -939,6 +965,25 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                                                onRetry:   { [weak self] att in self?.retryPDF(attachment: att) })
                     pdfBubbles[attachmentId] = bubble
                     stack.addArrangedSubview(makePDFRow(bubbleView: bubble))
+                } else if message.role == "assistant",
+                   message.id.hasPrefix(Self.storyMessageIdPrefix) {
+                    // story-prefixed assistant rows mirror the image/PDF
+                    // branches: the live attachment (with the rendered HTML
+                    // file URL) lives in `storyAttachments`. On a cold relaunch
+                    // before the render finished we surface the same recovery.
+                    let attachmentId = String(message.id.dropFirst(Self.storyMessageIdPrefix.count))
+                    let attachment = storyAttachments[attachmentId]
+                        ?? StoryAttachment(id: attachmentId,
+                                           title: message.content.isEmpty ? "Story" : message.content,
+                                           template: .dailyRecap,
+                                           jsonPayload: "{}",
+                                           status: .failed,
+                                           failureReason: "Story is no longer available — ask Loop to regenerate it.")
+                    let bubble = StoryBubbleView(attachment: attachment,
+                                                 onOpen:  { [weak self] att in self?.openStory(attachment: att) },
+                                                 onRetry: { [weak self] att in self?.retryStory(attachment: att) })
+                    storyBubbles[attachmentId] = bubble
+                    stack.addArrangedSubview(makeStoryRow(bubbleView: bubble))
                 } else {
                     // Going through messageStruct gives us the decoded
                     // FileAttachment (if any) without re-parsing JSON here.
@@ -959,6 +1004,8 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                                                                        role: message.role))
                     } else if let mapAttachment = m.mapAttachment {
                         stack.addArrangedSubview(makeMapRow(bubbleView: MapBubbleView(attachment: mapAttachment)))
+                    } else if let gallery = m.imageGalleryAttachment {
+                        stack.addArrangedSubview(makeImageGalleryRow(bubbleView: ImageGalleryBubbleView(attachment: gallery)))
                     } else {
                         stack.addArrangedSubview(makeBubble(role: message.role, text: message.content, model: m.role == "assistant" ? m.model : nil))
                     }
@@ -1026,6 +1073,31 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             title: attachment.title,
             document: attachment.document,
             template: attachment.template,
+            conversationId: attachment.conversationId
+        )
+    }
+
+    /// Open the rendered story in the full-screen player window. We retain a
+    /// single player at a time; opening another replaces it.
+    private func openStory(attachment: StoryAttachment) {
+        guard attachment.status == .ready,
+              let url = attachment.fileURL,
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        storyPlayer?.close()
+        let player = StoryPlayerWindowController(attachment: attachment)
+        storyPlayer = player
+        player.present()
+    }
+
+    /// Re-run a failed render under the same attachment id so the existing
+    /// bubble refreshes in place (StoryGenerationService has no separate
+    /// retry entry point — re-submitting with the same id is the retry).
+    private func retryStory(attachment: StoryAttachment) {
+        StoryGenerationService.shared.submit(
+            title: attachment.title,
+            template: attachment.template,
+            jsonPayload: attachment.jsonPayload,
+            attachmentId: attachment.id,
             conversationId: attachment.conversationId
         )
     }
@@ -1409,6 +1481,12 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
             }
             NSWorkspace.shared.open(url)
         }
+        card.onShare = { url in
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            let picker = NSSharingServicePicker(items: [text])
+            picker.show(relativeTo: card.bounds, of: card, preferredEdge: .minY)
+        }
         bubble.addSubview(card)
 
         let cardWidth: CGFloat = 240
@@ -1693,7 +1771,7 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
                 stack.addArrangedSubview(gridView)
                 gridView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             case .codeBlock(let block):
-                let codeView = makeCodeBlockView(block)
+                let codeView = makeCodeBlockView(block, maxWidth: maxWidth)
                 stack.addArrangedSubview(codeView)
                 codeView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             }
@@ -1703,7 +1781,7 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
 
     /// Builds a rounded container with monospaced code text, a subtle
     /// background, and an optional language label in the top-right corner.
-    private func makeCodeBlockView(_ block: MarkdownCodeBlock) -> NSView {
+    private func makeCodeBlockView(_ block: MarkdownCodeBlock, maxWidth: CGFloat) -> NSView {
         let container = AdaptiveTableLayerView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.adaptiveCornerRadius = 8
@@ -1711,9 +1789,12 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         container.adaptiveBorder = nil
         container.adaptiveBorderWidth = 0
 
+        // Wrap code at the bubble width (minus the 12pt inset on each side)
+        // so long lines reflow instead of being clipped off the right edge.
+        let inset: CGFloat = 12
         let codeFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let tv = ChatLinkTextView.makeBubbleTextView(maxTextWidth: .greatestFiniteMagnitude)
-        tv.textContainerInset = NSSize(width: 12, height: 12)
+        let tv = ChatLinkTextView.makeBubbleTextView(maxTextWidth: max(0, maxWidth - inset * 2))
+        tv.textContainerInset = NSSize(width: inset, height: inset)
         tv.textStorage?.setAttributedString(
             CodeSyntaxHighlighter.highlight(block.code, language: block.language, font: codeFont)
         )
@@ -1938,6 +2019,21 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         return row
     }
 
+    /// Left-aligned row for a generated story card, on the assistant side.
+    private func makeStoryRow(bubbleView: StoryBubbleView) -> NSView {
+        bubbleView.translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.addArrangedSubview(bubbleView)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        bubbleView.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
+        return row
+    }
+
     /// Wrap an image bubble in the same left-aligned row layout
     /// `makeBubble(role:"assistant", …)` uses, so generated images sit on
     /// the assistant side of the conversation alongside text replies.
@@ -1970,6 +2066,22 @@ final class ConversationWindowController: NSWindowController, ConversationPresen
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         row.addArrangedSubview(spacer)
         bubbleView.widthAnchor.constraint(lessThanOrEqualToConstant: 420).isActive = true
+        return row
+    }
+
+    /// Wrap a web image-search gallery in the same left-aligned assistant-side
+    /// row layout as image / map bubbles.
+    private func makeImageGalleryRow(bubbleView: ImageGalleryBubbleView) -> NSView {
+        bubbleView.translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.addArrangedSubview(bubbleView)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        bubbleView.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
         return row
     }
 
@@ -2214,6 +2326,118 @@ final class ImageBubbleView: NSView {
     }
 }
 
+/// Assistant-side bubble that renders web image-search results
+/// (`ImageGalleryAttachment`) as a horizontal strip of thumbnails. Thumbnails
+/// load asynchronously from their remote URLs; clicking one opens the
+/// full-resolution image in the default browser.
+final class ImageGalleryBubbleView: NSView {
+    private let attachment: ImageGalleryAttachment
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let scrollView = NSScrollView()
+    private let stack = NSStackView()
+    private static let thumbSide: CGFloat = 120
+
+    init(attachment: ImageGalleryAttachment) {
+        self.attachment = attachment
+        super.init(frame: .zero)
+        configure()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func configure() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let query = attachment.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.maximumNumberOfLines = 2
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.stringValue = query
+        titleLabel.isHidden = query.isEmpty
+        addSubview(titleLabel)
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasHorizontalScroller = true
+        scrollView.hasVerticalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        addSubview(scrollView)
+
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(stack)
+        scrollView.documentView = documentView
+
+        let side = ImageGalleryBubbleView.thumbSide
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: topAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            scrollView.topAnchor.constraint(equalTo: query.isEmpty ? topAnchor : titleLabel.bottomAnchor,
+                                            constant: query.isEmpty ? 0 : 6),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollView.heightAnchor.constraint(equalToConstant: side),
+
+            stack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: documentView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
+            documentView.heightAnchor.constraint(equalToConstant: side),
+        ])
+
+        for (index, item) in attachment.items.enumerated() {
+            let tile = makeTile(side: side, index: index)
+            stack.addArrangedSubview(tile)
+            if let thumbURL = URL(string: item.thumbnailURL) {
+                loadThumbnail(thumbURL, into: tile)
+            }
+        }
+    }
+
+    private func makeTile(side: CGFloat, index: Int) -> NSImageView {
+        let iv = ClickableImageView()
+        iv.tag = index
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.wantsLayer = true
+        iv.layer?.cornerRadius = 10
+        iv.layer?.masksToBounds = true
+        iv.layer?.borderWidth = 1
+        iv.layer?.borderColor = NSColor.separatorColor.cgColor
+        iv.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        iv.onClick = { [weak self] in
+            guard let self = self,
+                  index < self.attachment.items.count,
+                  let url = URL(string: self.attachment.items[index].originalURL) else { return }
+            NSWorkspace.shared.open(url)
+        }
+        NSLayoutConstraint.activate([
+            iv.widthAnchor.constraint(equalToConstant: side),
+            iv.heightAnchor.constraint(equalToConstant: side),
+        ])
+        return iv
+    }
+
+    private func loadThumbnail(_ url: URL, into tile: NSImageView) {
+        URLSession.shared.dataTask(with: url) { [weak tile] data, _, _ in
+            guard let data = data, let image = NSImage(data: data) else { return }
+            DispatchQueue.main.async {
+                tile?.image = image
+                tile?.layer?.backgroundColor = NSColor.clear.cgColor
+            }
+        }.resume()
+    }
+}
+
 /// Standard flipped-coordinate document view so newly added bubbles append
 /// at the bottom rather than at the top.
 final class FlippedView: NSView {
@@ -2273,8 +2497,15 @@ final class AdaptiveTableLayerView: NSView {
 /// image/PDF full-size via Preview.app.
 final class ClickableImageView: NSImageView {
     var fileURL: URL?
+    /// Optional click handler — takes precedence over `fileURL` when set (used
+    /// by the image-gallery tiles to open a remote URL).
+    var onClick: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
+        if let onClick = onClick {
+            onClick()
+            return
+        }
         guard let url = fileURL else {
             super.mouseDown(with: event)
             return
@@ -2290,6 +2521,7 @@ final class ClickableImageView: NSImageView {
 final class MacFilePreviewCardView: NSView {
 
     var onClick: ((URL) -> Void)?
+    var onShare: ((URL) -> Void)?
 
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
@@ -2297,6 +2529,22 @@ final class MacFilePreviewCardView: NSView {
     private let badgeContainer = NSView()
     private let subtitleLabel = NSTextField(labelWithString: "")
     private let snippetView = NSTextView()
+    private let shareRow = NSView()
+    private let shareRowSeparator = NSBox()
+    private let shareButton: NSButton = {
+        let b = NSButton()
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.bezelStyle = .recessed
+        b.isBordered = false
+        b.image = NSImage(systemSymbolName: "square.and.arrow.up",
+                          accessibilityDescription: "Share")
+        b.imagePosition = .imageOnly
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        b.contentTintColor = .secondaryLabelColor
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        return b
+    }()
+    private lazy var shareRowCollapsed: NSLayoutConstraint = shareRow.heightAnchor.constraint(equalToConstant: 0)
     private var fileURL: URL?
 
     init() {
@@ -2363,11 +2611,36 @@ final class MacFilePreviewCardView: NSView {
         snippetView.textContainer?.maximumNumberOfLines = 8
         snippetView.textContainer?.lineBreakMode = .byTruncatingTail
 
+        // Share row — separator + button, hidden by default.
+        shareRow.translatesAutoresizingMaskIntoConstraints = false
+        shareRow.isHidden = true
+
+        shareRowSeparator.translatesAutoresizingMaskIntoConstraints = false
+        shareRowSeparator.boxType = .separator
+        shareRow.addSubview(shareRowSeparator)
+
+        shareButton.target = self
+        shareButton.action = #selector(handleShareTap)
+        shareRow.addSubview(shareButton)
+
+        NSLayoutConstraint.activate([
+            shareRowSeparator.topAnchor.constraint(equalTo: shareRow.topAnchor),
+            shareRowSeparator.leadingAnchor.constraint(equalTo: shareRow.leadingAnchor),
+            shareRowSeparator.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor),
+
+            shareButton.topAnchor.constraint(equalTo: shareRowSeparator.bottomAnchor, constant: 2),
+            shareButton.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor, constant: -4),
+            shareButton.bottomAnchor.constraint(equalTo: shareRow.bottomAnchor, constant: -2),
+            shareButton.widthAnchor.constraint(equalToConstant: 24),
+            shareButton.heightAnchor.constraint(equalToConstant: 24),
+        ])
+
         addSubview(iconView)
         addSubview(titleLabel)
         addSubview(badgeContainer)
         addSubview(subtitleLabel)
         addSubview(snippetView)
+        addSubview(shareRow)
 
         NSLayoutConstraint.activate([
             iconView.widthAnchor.constraint(equalToConstant: 16),
@@ -2394,18 +2667,31 @@ final class MacFilePreviewCardView: NSView {
             snippetView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 8),
             snippetView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             snippetView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            snippetView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+
+            shareRow.topAnchor.constraint(equalTo: snippetView.bottomAnchor, constant: 8),
+            shareRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shareRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shareRow.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
         ])
 
-        // Two competing bottom constraints — the snippet drives the height
-        // when it's visible; otherwise the subtitle (chip-like generic
-        // card) pulls the bottom up. Priorities pick the right one.
+        shareRow.clipsToBounds = true
+        shareRowCollapsed.isActive = true
+
+        // Bottom priorities: share row > snippet > subtitle.
+        let shareRowBottom = bottomAnchor.constraint(equalTo: shareRow.bottomAnchor)
+        shareRowBottom.priority = NSLayoutConstraint.Priority(751)
+        shareRowBottom.isActive = true
         let bottomEqualSnippet = bottomAnchor.constraint(equalTo: snippetView.bottomAnchor, constant: 12)
         bottomEqualSnippet.priority = .defaultHigh
         bottomEqualSnippet.isActive = true
         let bottomEqualSubtitle = bottomAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12)
         bottomEqualSubtitle.priority = .defaultLow
         bottomEqualSubtitle.isActive = true
+    }
+
+    @objc private func handleShareTap() {
+        guard let url = fileURL else { return }
+        onShare?(url)
     }
 
     func configure(for attachment: FileAttachment) {
@@ -2426,6 +2712,8 @@ final class MacFilePreviewCardView: NSView {
             badgeContainer.isHidden = false
             subtitleLabel.stringValue = Self.subtitle("Markdown", size: sizeText)
             applyMarkdownSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .text:
             iconView.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil)
             if let lang = attachment.languageTag {
@@ -2437,6 +2725,8 @@ final class MacFilePreviewCardView: NSView {
                 subtitleLabel.stringValue = Self.subtitle("Text", size: sizeText)
             }
             applyCodeSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .generic:
             iconView.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
             badgeContainer.isHidden = true
@@ -2450,11 +2740,15 @@ final class MacFilePreviewCardView: NSView {
             subtitleLabel.stringValue = Self.subtitle(mimeLabel, size: sizeText)
             snippetView.string = ""
             snippetView.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         case .image, .pdf:
             iconView.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
             badgeContainer.isHidden = true
             subtitleLabel.stringValue = Self.subtitle(attachment.mimeType, size: sizeText)
             snippetView.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         }
     }
 
@@ -2937,6 +3231,65 @@ extension ConversationWindowController: PDFSkillHost {
     }
 
     private func resolvePDFAttachmentConversation(_ attachment: PDFAttachment) -> SimpleConversation? {
+        if let id = attachment.conversationId,
+           let conv = SimpleConversationManager.shared.getConversation(by: id) {
+            return conv
+        }
+        return SimpleConversationManager.shared.currentConversation
+    }
+}
+
+// MARK: - StorySkillHost
+
+extension ConversationWindowController: StorySkillHost {
+
+    /// Insert (or, on retry, refresh) a story card for a render that just
+    /// kicked off. Mirrors the image / PDF hosts: a placeholder message goes
+    /// into the persistent store under id `story-<id>` so a tab switch or
+    /// window reload re-renders the card.
+    func storySkillDidStartGenerating(_ attachment: StoryAttachment) {
+        storyAttachments[attachment.id] = attachment
+
+        if let existing = storyBubbles[attachment.id] {
+            existing.update(attachment: attachment)
+            if isStoryAttachmentForActiveTab(attachment) { surfaceForResponse() }
+            return
+        }
+
+        if let conversation = resolveStoryAttachmentConversation(attachment) {
+            let marker = MessageStruct(
+                id: "\(Self.storyMessageIdPrefix)\(attachment.id)",
+                role: "assistant",
+                content: attachment.title,
+                model: "loop-story"
+            )
+            SimpleConversationManager.shared.addMessage(marker, to: conversation)
+        }
+
+        guard isStoryAttachmentForActiveTab(attachment) else { return }
+
+        let bubble = StoryBubbleView(attachment: attachment,
+                                     onOpen:  { [weak self] att in self?.openStory(attachment: att) },
+                                     onRetry: { [weak self] att in self?.retryStory(attachment: att) })
+        storyBubbles[attachment.id] = bubble
+        stack.addArrangedSubview(makeStoryRow(bubbleView: bubble))
+        scrollToBottom()
+        surfaceForResponse()
+    }
+
+    func storySkillDidFinishGenerating(_ attachment: StoryAttachment) {
+        storyAttachments[attachment.id] = attachment
+        if let bubble = storyBubbles[attachment.id] {
+            bubble.update(attachment: attachment)
+        }
+    }
+
+    private func isStoryAttachmentForActiveTab(_ attachment: StoryAttachment) -> Bool {
+        guard let stamped = attachment.conversationId else { return true }
+        return stamped == activeTab?.conversation.id
+    }
+
+    private func resolveStoryAttachmentConversation(_ attachment: StoryAttachment) -> SimpleConversation? {
         if let id = attachment.conversationId,
            let conv = SimpleConversationManager.shared.getConversation(by: id) {
             return conv

@@ -17,7 +17,7 @@ struct MusicSkill {
     static let systemPromptFragment: String = """
 You can put on music to match the moment via these tools:
 - find_music: catalog search across songs, albums, and playlists. Pass `query`, optional `instrumental_only` (default false), optional `limit` (default 8).
-- play_music: start playback of a `target_id` from a previous find_music result. `target_type` ∈ "song" | "album" | "playlist". `queue_mode` ∈ "replace" | "append" (default "replace").
+- play_music: start playback of a `target_id` from a previous find_music result or a user-library id (p.… playlists, l.… albums, i.… songs). `target_type` ∈ "song" | "album" | "playlist". `queue_mode` ∈ "replace" | "append" (default "replace"). For playlists/albums the entire track list is queued, not just the first track.
 - set_music_mood: high-level shortcut — pass `mood` and we pick a fitting track for you. Mood vocabulary: \(MusicMoodMap.vocabularyList). Pass `instrumental_only=true` to force a vocal-free pick.
 - create_playlist: save a curated list of `track_ids` as a playlist in the user's Apple Music library. iOS only; on macOS this returns a friendly error.
 - control_music: queue control. `action` ∈ "pause" | "resume" | "skip" | "stop". Use "stop" when the user wants music off entirely.
@@ -62,13 +62,13 @@ How to behave:
             "type": "function",
             "function": [
                 "name": "play_music",
-                "description": "Start playback of a song / album / playlist by its catalog id (from a prior find_music call).",
+                "description": "Start playback of a song / album / playlist. Accepts catalog ids (from find_music) and user-library ids (p.… playlists, l.… albums, i.… songs).",
                 "parameters": [
                     "type": "object",
                     "properties": [
                         "target_id": [
                             "type": "string",
-                            "description": "Apple Music catalog id."
+                            "description": "Apple Music catalog or library id."
                         ],
                         "target_type": [
                             "type": "string",

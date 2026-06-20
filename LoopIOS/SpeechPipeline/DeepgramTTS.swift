@@ -197,6 +197,7 @@ final class DeepgramTTS: NSObject, URLSessionWebSocketDelegate {
                     // followed by the fallback's full speech back-to-back.
                     if self.engine.isRunning {
                         self.player.stop()
+                        self.engine.mainMixerNode.removeTap(onBus: 0)
                         self.engine.stop()
                     }
                     self.onError?(err)
@@ -260,8 +261,10 @@ final class DeepgramTTS: NSObject, URLSessionWebSocketDelegate {
             guard let self = self else { return }
             if self.engine.isRunning {
                 self.player.stop()
+                self.engine.mainMixerNode.removeTap(onBus: 0)
                 self.engine.stop()
             }
+            self.onOutputAmplitude?(0)
             self.task?.cancel(with: .normalClosure, reason: nil)
             self.task = nil
             self.session?.invalidateAndCancel()

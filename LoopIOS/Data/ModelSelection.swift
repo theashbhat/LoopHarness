@@ -94,8 +94,9 @@ enum ModelSelection: String, CaseIterable {
     case claudeSonnet46 = "claudeSonnet46"
     case claudeHaiku45  = "claudeHaiku45"
 
-    // Fireworks — Kimi K2.6 served via Fireworks inference.
+    // Fireworks — models served via Fireworks inference.
     case fireworksKimiK26 = "fireworksKimiK26"
+    case fireworksGLM52  = "fireworksGLM52"
 
     var provider: ModelProvider {
         switch self {
@@ -105,7 +106,7 @@ enum ModelSelection: String, CaseIterable {
             return .openAI
         case .claudeOpus47, .claudeSonnet46, .claudeHaiku45:
             return .anthropic
-        case .fireworksKimiK26:
+        case .fireworksKimiK26, .fireworksGLM52:
             return .fireworks
         }
     }
@@ -122,6 +123,7 @@ enum ModelSelection: String, CaseIterable {
         case .claudeSonnet46:  return "Claude Sonnet 4.6"
         case .claudeHaiku45:   return "Claude Haiku 4.5"
         case .fireworksKimiK26: return "Kimi K2.6"
+        case .fireworksGLM52:  return "GLM 5.2"
         }
     }
 
@@ -140,6 +142,7 @@ enum ModelSelection: String, CaseIterable {
         case .claudeSonnet46:  return "claude-sonnet-4-6"
         case .claudeHaiku45:   return "claude-haiku-4-5-20251001"
         case .fireworksKimiK26: return "accounts/fireworks/models/kimi-k2p6"
+        case .fireworksGLM52:  return "accounts/fireworks/models/glm-5p2"
         }
     }
 
@@ -166,6 +169,7 @@ enum ModelSelection: String, CaseIterable {
         case .claudeSonnet46:   return 200_000
         case .claudeHaiku45:    return 200_000
         case .fireworksKimiK26: return 131_072
+        case .fireworksGLM52:  return 1_048_576
         }
     }
 
@@ -192,6 +196,53 @@ enum ModelSelection: String, CaseIterable {
         case .anthropic: return .anthropic
         case .fireworks: return .fireworks
         }
+    }
+
+    /// Whether this model can accept image input. Drives the per-turn vision
+    /// fallback: a turn that must send a raw image is routed to a vision-capable
+    /// model when the selected one can't see images (see
+    /// `AgentHarness.chat`). If a provider adds/removes vision support, this is
+    /// the one place to update.
+    var supportsVision: Bool {
+        switch self {
+        case .appleFoundation:
+            return false
+        case .gpt55, .gpt51, .gpt41, .gpt4o:
+            return true
+        case .claudeOpus47, .claudeSonnet46, .claudeHaiku45:
+            return true
+        case .fireworksKimiK26:
+            return true
+        case .fireworksGLM52:
+            // GLM 5.2 on Fireworks is text-only — image turns fall back to Kimi.
+            return false
+        }
+    }
+
+    /// Whether this model can actually run right now: a hosted model needs its
+    /// API key configured; Apple needs the on-device model available.
+    var isUsable: Bool {
+        guard let key = requiredKey else {
+            return ModelProvider.isAppleFoundationAvailable
+        }
+        return KeyStore.shared.source(for: key) != .missing
+    }
+
+    /// A vision-capable, currently-usable model to handle an image turn when the
+    /// selected model can't. Prefers the same provider (so keys/billing stay
+    /// consistent — e.g. GLM 5.2 → Kimi K2.6 on Fireworks), then falls back to
+    /// the first usable vision model on any hosted provider. Returns nil when no
+    /// vision-capable model is configured. Apple is never returned (no vision).
+    static func visionCapableFallback(preferring provider: ModelProvider) -> ModelSelection? {
+        if let sameProvider = models(for: provider).first(where: { $0.supportsVision && $0.isUsable }) {
+            return sameProvider
+        }
+        for other in [ModelProvider.anthropic, .openAI, .fireworks] where other != provider {
+            if let model = models(for: other).first(where: { $0.supportsVision && $0.isUsable }) {
+                return model
+            }
+        }
+        return nil
     }
 }
 

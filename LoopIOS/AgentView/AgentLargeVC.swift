@@ -81,6 +81,13 @@ final class AgentLargeVC: UIViewController {
     }
 
     @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
+        // Transform the CONTENT view (`agentView`), not the controller's root
+        // `view`, and measure translation against the root (which never moves,
+        // so it's a stable reference). Transforming the constrained child-VC
+        // root view directly doesn't render during the drag — the move only
+        // appears on release — which is exactly the "animates on release, not
+        // during the drag" bug. Sliding the pinned content subview instead
+        // renders live, mirroring the working ImageViewerVC dismiss.
         let translation = pan.translation(in: view)
         switch pan.state {
         case .changed:
@@ -89,11 +96,11 @@ final class AgentLargeVC: UIViewController {
             let dy = max(0, translation.y)
             // Rubber-band — feels increasingly resistant the farther you drag.
             let damped = dy < dismissThreshold ? dy : dismissThreshold + (dy - dismissThreshold) * 0.4
-            view.transform = CGAffineTransform(translationX: 0, y: damped)
+            agentView.transform = CGAffineTransform(translationX: 0, y: damped)
             // Fade out as the user drags so the dismiss feels imminent before
             // the threshold trips.
             let progress = min(1, dy / 300)
-            view.alpha = 1 - 0.4 * progress
+            agentView.alpha = 1 - 0.4 * progress
         case .ended, .cancelled:
             if translation.y > dismissThreshold {
                 if let onDismiss = onDismiss {
@@ -107,8 +114,8 @@ final class AgentLargeVC: UIViewController {
                                usingSpringWithDamping: 0.75,
                                initialSpringVelocity: 0.4,
                                options: [.allowUserInteraction]) {
-                    self.view.transform = .identity
-                    self.view.alpha = 1
+                    self.agentView.transform = .identity
+                    self.agentView.alpha = 1
                 }
             }
         default:

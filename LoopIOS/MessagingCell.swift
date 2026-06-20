@@ -36,6 +36,20 @@ protocol MessagingCellPDFDelegate: AnyObject {
     func messagingCellDidTapPDFRetry(attachmentId: String)
 }
 
+/// Tap-callbacks from the inline story card. Set on every cell that renders
+/// a story attachment so MessagingVC can present the full-screen story player
+/// or re-run a failed render.
+protocol MessagingCellStoryDelegate: AnyObject {
+    func messagingCellDidTapStory(attachmentId: String)
+    func messagingCellDidTapStoryRetry(attachmentId: String)
+}
+
+/// Tap-callback from a browse preview card. Set on cells carrying a browse
+/// attachment so MessagingVC can present the full-screen live/replay player.
+protocol MessagingCellBrowseDelegate: AnyObject {
+    func messagingCellDidTapBrowse(attachmentId: String)
+}
+
 /// Tap-callback from the inline "Used N tools" disclosure row. Set on cells
 /// that render an assistant turn carrying tool calls so MessagingVC can toggle
 /// the row's expanded/collapsed state.
@@ -109,6 +123,35 @@ class MessagingCell: UITableViewCell {
     /// via `setTTSStatus(_:)`. Hidden by default so user/system messages stay
     /// untouched.
     let ttsIndicator = UIActivityIndicatorView(style: .medium)
+
+    // MARK: - Swipe-to-reveal timestamp (iMessage-style)
+    /// Sits just off the cell's right edge; revealed when the chat is swiped
+    /// left. MessagingVC drives every visible cell's `contentView` translation
+    /// in lock-step from a single pan, so all bubbles slide together and these
+    /// labels come into view at once. Text is the message's posted time.
+    let timeLabel: UILabel = {
+        let l = UILabel()
+        l.font = .preferredFont(forTextStyle: .caption1)
+        l.textColor = .secondaryLabel
+        l.textAlignment = .right
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+    private var timeLabelInstalled = false
+    /// Formats a message's `timestamp` for the swipe-reveal label. Shows the
+    /// short time for today's messages and a "M/d, h:mm a" stamp for older ones,
+    /// mirroring how iMessage labels its swiped timestamps.
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+    private static let dayTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMMd jmm")
+        return f
+    }()
 
     // MARK: - Inline image attachment views (image_spec)
     let attachmentImageView = UIImageView()
@@ -200,6 +243,141 @@ class MessagingCell: UITableViewCell {
     private var currentPDFAttachmentId: String?
     weak var pdfDelegate: MessagingCellPDFDelegate?
 
+    // MARK: - Inline story card views (StorySkill)
+    /// Portrait "poster" card for a generated HTML story. The full story
+    /// renders in the full-screen player on tap; the card is a glanceable
+    /// stand-in (gradient + title + play glyph) with a spinner while
+    /// generating and a retry affordance on failure.
+    private lazy var storyCardView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.layer.cornerRadius = 16
+        v.clipsToBounds = true
+        v.backgroundColor = UIColor.secondarySystemBackground
+        v.isHidden = true
+        v.isUserInteractionEnabled = true
+        return v
+    }()
+    private lazy var storyGradientLayer: CAGradientLayer = {
+        let g = CAGradientLayer()
+        g.colors = [
+            UIColor.systemIndigo.cgColor,
+            UIColor.systemPurple.cgColor,
+            UIColor.systemPink.cgColor,
+        ]
+        g.startPoint = CGPoint(x: 0, y: 0)
+        g.endPoint = CGPoint(x: 1, y: 1)
+        return g
+    }()
+    private lazy var storyPlayGlyph: UIImageView = {
+        let v = UIImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 34, weight: .semibold)
+        v.image = UIImage(systemName: "play.circle.fill", withConfiguration: cfg)
+        v.tintColor = UIColor.white.withAlphaComponent(0.95)
+        v.contentMode = .scaleAspectFit
+        return v
+    }()
+    private lazy var storyTitleLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 17, weight: .bold)
+        l.textColor = .white
+        l.numberOfLines = 3
+        return l
+    }()
+    private lazy var storySubtitleLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.preferredFont(forTextStyle: .caption1)
+        l.textColor = UIColor.white.withAlphaComponent(0.85)
+        l.numberOfLines = 2
+        return l
+    }()
+    private lazy var storySpinner: UIActivityIndicatorView = {
+        let s = UIActivityIndicatorView(style: .medium)
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.color = .white
+        s.hidesWhenStopped = true
+        return s
+    }()
+    private lazy var storyRetryButton: UIButton = {
+        let b = makePDFActionButton(title: "Try again",
+                                    systemImage: "arrow.clockwise",
+                                    action: #selector(handleStoryRetryTap))
+        return b
+    }()
+    private lazy var storyTapRecognizer: UITapGestureRecognizer = {
+        let r = UITapGestureRecognizer(target: self, action: #selector(handleStoryTap))
+        r.numberOfTapsRequired = 1
+        return r
+    }()
+    private var storyCardConstraints: [NSLayoutConstraint] = []
+    private var currentStoryAttachmentId: String?
+    weak var storyDelegate: MessagingCellStoryDelegate?
+
+    // MARK: - Inline browse preview card (browse)
+    private lazy var browseCardView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.layer.cornerRadius = 16
+        v.clipsToBounds = true
+        v.backgroundColor = UIColor.secondarySystemBackground
+        v.isHidden = true
+        v.isUserInteractionEnabled = true
+        return v
+    }()
+    private lazy var browseThumbnail: UIImageView = {
+        let v = UIImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.contentMode = .scaleAspectFill
+        v.clipsToBounds = true
+        v.backgroundColor = UIColor.tertiarySystemBackground
+        return v
+    }()
+    private lazy var browseSpinner: UIActivityIndicatorView = {
+        let s = UIActivityIndicatorView(style: .medium)
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.hidesWhenStopped = true
+        return s
+    }()
+    private lazy var browseGlyph: UIImageView = {
+        let v = UIImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        v.image = UIImage(systemName: "globe", withConfiguration: cfg)
+        v.tintColor = .secondaryLabel
+        v.contentMode = .scaleAspectFit
+        return v
+    }()
+    private lazy var browseHostLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        l.textColor = .label
+        l.numberOfLines = 1
+        l.lineBreakMode = .byTruncatingTail
+        return l
+    }()
+    private lazy var browsePill: PaddedLabel = {
+        let l = PaddedLabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 11, weight: .bold)
+        l.textColor = .white
+        l.layer.cornerRadius = 8
+        l.clipsToBounds = true
+        l.textAlignment = .center
+        return l
+    }()
+    private lazy var browseTapRecognizer: UITapGestureRecognizer = {
+        let r = UITapGestureRecognizer(target: self, action: #selector(handleBrowseTap))
+        r.numberOfTapsRequired = 1
+        return r
+    }()
+    private var browseCardConstraints: [NSLayoutConstraint] = []
+    private var currentBrowseAttachmentId: String?
+    weak var browseDelegate: MessagingCellBrowseDelegate?
+
     // MARK: - Inline map attachment views (MapsSkill)
     /// Caption label shown above the map (optional — hidden when nil).
     private lazy var mapTitleLabel: UILabel = {
@@ -234,6 +412,46 @@ class MessagingCell: UITableViewCell {
     private var mapConstraints: [NSLayoutConstraint] = []
     private var currentMapAttachmentId: String?
 
+    // MARK: - Image-gallery views (web image search)
+
+    /// Caption shown above the gallery (the search query, e.g. "Alamo Square park").
+    private lazy var galleryTitleLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        l.textColor = .label
+        l.numberOfLines = 2
+        l.isHidden = true
+        return l
+    }()
+    /// Horizontally-scrolling strip of thumbnails. Lazy so plain messages
+    /// don't pay for it. Tiles are rebuilt imperatively each render.
+    private lazy var galleryScrollView: ImageGalleryScrollView = {
+        let sv = ImageGalleryScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.showsHorizontalScrollIndicator = false
+        sv.showsVerticalScrollIndicator = false
+        sv.clipsToBounds = false
+        sv.isHidden = true
+        return sv
+    }()
+    private lazy var galleryStack: UIStackView = {
+        let st = UIStackView()
+        st.translatesAutoresizingMaskIntoConstraints = false
+        st.axis = .horizontal
+        st.alignment = .center
+        st.spacing = 8
+        return st
+    }()
+    private var galleryConstraints: [NSLayoutConstraint] = []
+    private var currentGalleryAttachmentId: String?
+    /// Bumped on every gallery render so stale async thumbnail loads from a
+    /// recycled cell don't paint onto the wrong message's tiles.
+    private var galleryLoadToken: Int = 0
+    /// Per-tile mapping (tile tag → full-resolution URL) for tap-to-open.
+    private var galleryOriginalURLs: [Int: URL] = [:]
+    private static let galleryThumbSide: CGFloat = 120
+
     private var currentAttachmentId: String?
     /// Set by `applyFileAttachment` (user upload) so the tap handler can
     /// open a QuickLook preview directly instead of routing through the
@@ -253,6 +471,7 @@ class MessagingCell: UITableViewCell {
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.onTap = { [weak self] in self?.handleFilePreviewCardTap() }
+        v.onShare = { [weak self] in self?.handleFilePreviewCardShare() }
         return v
     }()
     private var filePreviewCardConstraints: [NSLayoutConstraint] = []
@@ -331,6 +550,12 @@ class MessagingCell: UITableViewCell {
         timer?.invalidate()
         timer = nil
 
+        // Reset the swipe-to-reveal slide so a recycled cell doesn't carry over
+        // a mid-swipe offset, and clear the stale time text.
+        timeRevealOffset = 0
+        contentView.transform = .identity
+        timeLabel.text = nil
+
         // Halt any in-flight type-on reveal so a recycled cell doesn't keep
         // fading into the wrong message.
         stopTypeOnReveal()
@@ -387,6 +612,31 @@ class MessagingCell: UITableViewCell {
         NSLayoutConstraint.deactivate(pdfCardConstraints)
         pdfCardConstraints.removeAll()
 
+        // Story card cleanup. Hide + clear + restore the label colors the
+        // failure path overrides, so a recycled cell doesn't flash stale text.
+        storyCardView.isHidden = true
+        storyTitleLabel.text = nil
+        storyTitleLabel.textColor = .white
+        storySubtitleLabel.text = nil
+        storySubtitleLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        storySpinner.stopAnimating()
+        storySpinner.isHidden = true
+        storyRetryButton.isHidden = true
+        currentStoryAttachmentId = nil
+        NSLayoutConstraint.deactivate(storyCardConstraints)
+        storyCardConstraints.removeAll()
+
+        // Browse card cleanup — same recycle hygiene as the story card.
+        browseCardView.isHidden = true
+        browseThumbnail.image = nil
+        browseHostLabel.text = nil
+        browsePill.text = nil
+        browseSpinner.stopAnimating()
+        browseSpinner.isHidden = true
+        currentBrowseAttachmentId = nil
+        NSLayoutConstraint.deactivate(browseCardConstraints)
+        browseCardConstraints.removeAll()
+
         // Map cleanup — drop annotations so a recycled cell doesn't briefly
         // show the previous message's pins.
         mapView.removeAnnotations(mapView.annotations)
@@ -396,6 +646,22 @@ class MessagingCell: UITableViewCell {
         currentMapAttachmentId = nil
         NSLayoutConstraint.deactivate(mapConstraints)
         mapConstraints.removeAll()
+
+        // Image-gallery cleanup — invalidate in-flight thumbnail loads, tear
+        // down the tiles, and hide the strip so a recycled cell doesn't flash
+        // the previous message's images.
+        galleryLoadToken &+= 1
+        galleryScrollView.isHidden = true
+        galleryTitleLabel.isHidden = true
+        galleryTitleLabel.text = nil
+        currentGalleryAttachmentId = nil
+        galleryOriginalURLs.removeAll()
+        for tile in galleryStack.arrangedSubviews {
+            galleryStack.removeArrangedSubview(tile)
+            tile.removeFromSuperview()
+        }
+        NSLayoutConstraint.deactivate(galleryConstraints)
+        galleryConstraints.removeAll()
 
         // Onboarding-card cleanup. Same hide-and-reset pattern as the file
         // preview card — the view is reused across cells that render
@@ -517,6 +783,11 @@ class MessagingCell: UITableViewCell {
             self.addViews(views: [attachmentImageView, attachmentSpinner, attachmentErrorLabel, downloadButton, retryButton])
         }
 
+        // Swipe-left reveals when this message was posted. Set on every render
+        // path (early-returns below all inherit it), so all bubble kinds slide
+        // out to the same timestamp column.
+        setTimeLabel(for: data.timestamp)
+
         // Onboarding card takes its own dedicated path: a left-aligned text
         // bubble with the prompt and an interactive card pinned underneath.
         // Routed first so it bypasses the image / file / table branches
@@ -543,10 +814,33 @@ class MessagingCell: UITableViewCell {
             return
         }
 
+        // Inline story card (generate_story). Renders as a portrait poster
+        // with title + play glyph; tap opens the full-screen story player.
+        if let storyAttachment = data.storyAttachment {
+            applyStoryAttachment(storyAttachment, modelLabelText: modelText(for: data))
+            return
+        }
+
+        // Inline browse preview card (browse). Shows the latest screenshot +
+        // host + a status pill; tap opens the full-screen live/replay player.
+        if let browseAttachment = data.browseAttachment {
+            applyBrowseAttachment(browseAttachment, modelLabelText: modelText(for: data))
+            return
+        }
+
         // Inline map embed — MKMapView with one pin per place. Callouts
         // open Apple Maps for that destination.
         if let mapAttachment = data.mapAttachment {
             applyMapAttachment(mapAttachment, modelLabelText: modelText(for: data))
+            return
+        }
+
+        // Inline web-image-search gallery — a horizontal strip of thumbnails
+        // loaded from the result URLs; tap a thumbnail to open the full image.
+        if let galleryAttachment = data.imageGalleryAttachment {
+            // Attribution is the image source, not the chat model — these are
+            // real photos from Google Images (via SerpAPI), not model output.
+            applyImageGalleryAttachment(galleryAttachment, modelLabelText: "Google Images")
             return
         }
 
@@ -639,16 +933,25 @@ class MessagingCell: UITableViewCell {
             animatingtextView.textContainer.widthTracksTextView = true
             
             
-            textView.attributedText = self.attributedString(from: data.content)
+            // Render the markdown once and share it between the base text view
+            // and the animating overlay.
+            let full = self.attributedString(from: data.content)
+
+            // IMPORTANT: set `font`/`textColor` BEFORE assigning `attributedText`.
+            // On a UITextView these setters apply uniformly to the *existing*
+            // text, so setting them AFTER `attributedText` strips the per-range
+            // bold/link styling the markdown renderer produced. That left the
+            // base `textView` rendering in plain body weight while the overlay
+            // kept its bold — so the two wrapped differently and, with both
+            // visible, drew the text twice at mismatched positions (the
+            // "garbled / doubled text" bug, worst around bold/heading/link runs).
             textView.textColor = .label
             textView.font = UIFont.preferredFont(forTextStyle: .body)
-            textView.alpha = 0.1
             textView.layer.borderWidth = 0
             textView.layer.borderColor = UIColor.clear.cgColor
-            
-            animatingtextView.alpha = 1
+            textView.attributedText = full
+
             animatingtextView.textColor = .label
-//            animatingtextView.text = data.content
             animatingtextView.font = UIFont.preferredFont(forTextStyle: .body)
 
             let byline = modelText(for: data)
@@ -669,14 +972,18 @@ class MessagingCell: UITableViewCell {
             // which re-ran markdown regex per tick and relaid out the table —
             // this renders markdown once, fixes the height via `textView`, and
             // only modulates per-word alpha. See docs/streaming-investigation.md.
-            let full = self.attributedString(from: data.content)
             if shouldAnimate, !UIAccessibility.isReduceMotionEnabled {
+                // Base layer is the invisible height anchor; the overlay fades
+                // the words in (startTypeOnReveal sets textView.alpha = 0).
                 startTypeOnReveal(full: full)
             } else {
+                // No animation: render through the single base text view and
+                // keep the overlay fully hidden. Showing both at once draws the
+                // same text twice, which garbles whenever their wrapping diverges.
                 stopTypeOnReveal()
                 textView.alpha = 1.0
-                animatingtextView.alpha = 1
-                animatingtextView.attributedText = full
+                animatingtextView.alpha = 0
+                animatingtextView.attributedText = nil
             }
             
             // Update content size after setting text
@@ -689,17 +996,40 @@ class MessagingCell: UITableViewCell {
             animatingtextView.isHidden = true
             actionButton.isHidden = true
             shimmerLabel.isHidden = true
-            modelLabel.isHidden = true
-            
+
+            // Dictation byline ("Deepgram STT"/"Apple STT") under the user bubble, reusing
+            // `modelLabel`. When present it drives the cell bottom; otherwise
+            // the text view pins to the bottom as before.
+            let sttByline = data.sttEngine?.trimmingCharacters(in: .whitespaces)
+            let hasSTTByline = !(sttByline ?? "").isEmpty
+            modelLabel.isHidden = !hasSTTByline
+
             // Store and activate text view constraints for user messages
             textViewConstraints = [
                 textView.trailingAnchor.constraint(equalTo: self.contentView.trailingAnchor, constant: -10),
                 textView.topAnchor.constraint(equalTo: self.contentView.topAnchor, constant: 6),
                 textView.widthAnchor.constraint(lessThanOrEqualTo: self.contentView.widthAnchor, multiplier: 0.8, constant: -40),
-                textView.bottomAnchor.constraint(equalTo: self.contentView.bottomAnchor, constant: -6)
             ]
-            
+            if !hasSTTByline {
+                textViewConstraints.append(
+                    textView.bottomAnchor.constraint(equalTo: self.contentView.bottomAnchor, constant: -6)
+                )
+            }
             NSLayoutConstraint.activate(textViewConstraints)
+
+            if hasSTTByline {
+                modelLabel.text = sttByline
+                modelLabel.textColor = .secondaryLabel
+                modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+                modelLabel.numberOfLines = 1
+                baseModelText = sttByline
+                modelLabelConstraints = [
+                    modelLabel.trailingAnchor.constraint(equalTo: textView.trailingAnchor, constant: -2),
+                    modelLabel.topAnchor.constraint(equalTo: textView.bottomAnchor, constant: 2),
+                    self.contentView.bottomAnchor.constraint(equalTo: modelLabel.bottomAnchor, constant: 6),
+                ]
+                NSLayoutConstraint.activate(modelLabelConstraints)
+            }
             animatingtextView.alpha = 0
             textView.alpha = 1
             textView.textContainerInset = .init(top: 8, left: 10, bottom: 8, right: 10)
@@ -782,6 +1112,61 @@ class MessagingCell: UITableViewCell {
             view.translatesAutoresizingMaskIntoConstraints = false
             self.contentView.addSubview(view)
         }
+    }
+
+    // MARK: - Swipe-to-reveal timestamp
+
+    /// Adds `timeLabel` to the content view exactly once, pinned just past the
+    /// right edge so it's off-screen until the chat is swiped left. It rides
+    /// inside `contentView`, so translating the content view (see
+    /// `setTimeRevealOffset`) slides the bubble out and this label in together —
+    /// the whole row moves as one unit, like iMessage.
+    private func installTimeLabelIfNeeded() {
+        guard !timeLabelInstalled else { return }
+        timeLabelInstalled = true
+        // Content view must not clip, or the off-edge label is invisible even
+        // once revealed.
+        contentView.clipsToBounds = false
+        contentView.addSubview(timeLabel)
+        // Trailing is pinned past the right edge by (reveal column − inset), so
+        // at a full swipe the label settles 12pt from the edge, right-aligned —
+        // wider "older message" stamps grow leftward instead of clipping. Must
+        // stay in sync with MessagingVC.timeRevealMax.
+        NSLayoutConstraint.activate([
+            timeLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: 72 - 12),
+            timeLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+    }
+
+    /// Sets the swipe-reveal time text for this row from its message.
+    func setTimeLabel(for date: Date) {
+        installTimeLabelIfNeeded()
+        timeLabel.text = Calendar.current.isDateInToday(date)
+            ? Self.timeFormatter.string(from: date)
+            : Self.dayTimeFormatter.string(from: date)
+    }
+
+    /// Current swipe-reveal slide offset, retained so `layoutSubviews` can
+    /// re-assert the transform. `UITableViewCell.layoutSubviews` sets
+    /// `contentView.frame = bounds`, which cancels a translation transform's
+    /// visible offset — and the nav-orb's display-link animation invalidates
+    /// the view tree every frame, so that reset fires continuously during a
+    /// drag. The net effect was the slide only appearing on release (when the
+    /// explicit spring animation took over). Re-applying after every layout
+    /// keeps the live drag visible.
+    private var timeRevealOffset: CGFloat = 0
+
+    /// Slides the whole row left by `offset` points to reveal the timestamp.
+    /// Driven by MessagingVC's pan so every visible cell moves in lock-step.
+    func setTimeRevealOffset(_ offset: CGFloat) {
+        timeRevealOffset = offset
+        applyTimeRevealTransform()
+    }
+
+    private func applyTimeRevealTransform() {
+        contentView.transform = timeRevealOffset == 0
+            ? .identity
+            : CGAffineTransform(translationX: -timeRevealOffset, y: 0)
     }
     
     func attributedString(from text: String) -> NSAttributedString {
@@ -1743,6 +2128,271 @@ class MessagingCell: UITableViewCell {
         pdfDelegate?.messagingCellDidTapPDFRetry(attachmentId: id)
     }
 
+    // MARK: - Story card
+
+    private func applyStoryAttachment(_ attachment: StoryAttachment,
+                                      modelLabelText: String) {
+        currentStoryAttachmentId = attachment.id
+
+        // Hide every other render path's views; the story card takes the row.
+        profileImageView.isHidden = true
+        textView.isHidden = true
+        animatingtextView.isHidden = true
+        actionButton.isHidden = true
+        shimmerLabel.isHidden = true
+        modelLabel.isHidden = false
+        attachmentImageView.isHidden = true
+        attachmentSpinner.stopAnimating()
+        attachmentSpinner.isHidden = true
+        attachmentErrorLabel.isHidden = true
+        downloadButton.isHidden = true
+        retryButton.isHidden = true
+        browseCardView.isHidden = true
+
+        if storyCardView.superview == nil {
+            self.contentView.addSubview(storyCardView)
+            storyCardView.layer.insertSublayer(storyGradientLayer, at: 0)
+            storyCardView.addSubview(storyPlayGlyph)
+            storyCardView.addSubview(storyTitleLabel)
+            storyCardView.addSubview(storySubtitleLabel)
+            storyCardView.addSubview(storySpinner)
+            storyCardView.addSubview(storyRetryButton)
+        }
+        if storyTapRecognizer.view !== storyCardView {
+            storyCardView.addGestureRecognizer(storyTapRecognizer)
+        }
+
+        storyCardView.isHidden = false
+
+        // Portrait poster — 9:16-ish, sized small so it reads as a card.
+        let cardWidth: CGFloat = 160
+        let cardHeight: CGFloat = 248
+
+        storyCardConstraints = [
+            storyCardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            storyCardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            storyCardView.widthAnchor.constraint(equalToConstant: cardWidth),
+            storyCardView.heightAnchor.constraint(equalToConstant: cardHeight),
+
+            storyPlayGlyph.topAnchor.constraint(equalTo: storyCardView.topAnchor, constant: 16),
+            storyPlayGlyph.leadingAnchor.constraint(equalTo: storyCardView.leadingAnchor, constant: 16),
+
+            storySpinner.centerXAnchor.constraint(equalTo: storyCardView.centerXAnchor),
+            storySpinner.centerYAnchor.constraint(equalTo: storyCardView.centerYAnchor),
+
+            storyTitleLabel.leadingAnchor.constraint(equalTo: storyCardView.leadingAnchor, constant: 16),
+            storyTitleLabel.trailingAnchor.constraint(equalTo: storyCardView.trailingAnchor, constant: -16),
+
+            storySubtitleLabel.leadingAnchor.constraint(equalTo: storyTitleLabel.leadingAnchor),
+            storySubtitleLabel.trailingAnchor.constraint(equalTo: storyTitleLabel.trailingAnchor),
+            storySubtitleLabel.topAnchor.constraint(equalTo: storyTitleLabel.bottomAnchor, constant: 4),
+            storySubtitleLabel.bottomAnchor.constraint(equalTo: storyCardView.bottomAnchor, constant: -16),
+
+            storyRetryButton.leadingAnchor.constraint(equalTo: storyTitleLabel.leadingAnchor),
+            storyRetryButton.topAnchor.constraint(equalTo: storySubtitleLabel.bottomAnchor, constant: 8),
+
+            modelLabel.leadingAnchor.constraint(equalTo: storyCardView.leadingAnchor),
+            modelLabel.topAnchor.constraint(equalTo: storyCardView.bottomAnchor, constant: 6),
+            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: modelLabel.bottomAnchor, constant: 12),
+        ]
+        NSLayoutConstraint.activate(storyCardConstraints)
+
+        storyTitleLabel.text = attachment.title
+
+        switch attachment.status {
+        case .generating:
+            storyGradientLayer.isHidden = false
+            storyPlayGlyph.isHidden = true
+            storySpinner.isHidden = false
+            storySpinner.startAnimating()
+            storySubtitleLabel.text = "Creating story…"
+            storyRetryButton.isHidden = true
+            storyTapRecognizer.isEnabled = false
+        case .ready:
+            storyGradientLayer.isHidden = false
+            storySpinner.stopAnimating()
+            storySpinner.isHidden = true
+            storyPlayGlyph.isHidden = false
+            storySubtitleLabel.text = "Tap to view"
+            storyRetryButton.isHidden = true
+            storyTapRecognizer.isEnabled = true
+        case .failed:
+            storyGradientLayer.isHidden = true
+            storySpinner.stopAnimating()
+            storySpinner.isHidden = true
+            storyPlayGlyph.isHidden = true
+            storyTitleLabel.textColor = .label
+            storySubtitleLabel.textColor = .secondaryLabel
+            storySubtitleLabel.text = attachment.failureReason ?? "Couldn't generate story"
+            storyRetryButton.isHidden = false
+            storyTapRecognizer.isEnabled = false
+        }
+
+        baseModelText = modelLabelText
+        modelLabel.text = modelLabelText
+        modelLabel.textColor = .secondaryLabel
+        modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+        modelLabel.numberOfLines = 1
+        ttsIndicator.stopAnimating()
+        ttsIndicator.isHidden = true
+        setNeedsLayout()
+    }
+
+    @objc private func handleStoryTap() {
+        guard let id = currentStoryAttachmentId else { return }
+        storyDelegate?.messagingCellDidTapStory(attachmentId: id)
+    }
+
+    @objc private func handleStoryRetryTap() {
+        guard let id = currentStoryAttachmentId else { return }
+        storyDelegate?.messagingCellDidTapStoryRetry(attachmentId: id)
+    }
+
+    // MARK: - Browse preview card
+
+    private func applyBrowseAttachment(_ attachment: BrowseAttachment,
+                                       modelLabelText: String) {
+        currentBrowseAttachmentId = attachment.id
+
+        // Hide every other render path's views; the browse card takes the row.
+        profileImageView.isHidden = true
+        textView.isHidden = true
+        animatingtextView.isHidden = true
+        actionButton.isHidden = true
+        shimmerLabel.isHidden = true
+        modelLabel.isHidden = false
+        attachmentImageView.isHidden = true
+        attachmentSpinner.stopAnimating()
+        attachmentSpinner.isHidden = true
+        attachmentErrorLabel.isHidden = true
+        downloadButton.isHidden = true
+        retryButton.isHidden = true
+        storyCardView.isHidden = true
+
+        if browseCardView.superview == nil {
+            self.contentView.addSubview(browseCardView)
+            browseCardView.addSubview(browseThumbnail)
+            browseCardView.addSubview(browseSpinner)
+            browseCardView.addSubview(browseGlyph)
+            browseCardView.addSubview(browseHostLabel)
+            browseCardView.addSubview(browsePill)
+        }
+        if browseTapRecognizer.view !== browseCardView {
+            browseCardView.addGestureRecognizer(browseTapRecognizer)
+        }
+        browseCardView.isHidden = false
+
+        let cardWidth: CGFloat = 232
+        let thumbHeight: CGFloat = 132
+        let footerHeight: CGFloat = 40
+
+        browseCardConstraints = [
+            browseCardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            browseCardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            browseCardView.widthAnchor.constraint(equalToConstant: cardWidth),
+
+            browseThumbnail.topAnchor.constraint(equalTo: browseCardView.topAnchor),
+            browseThumbnail.leadingAnchor.constraint(equalTo: browseCardView.leadingAnchor),
+            browseThumbnail.trailingAnchor.constraint(equalTo: browseCardView.trailingAnchor),
+            browseThumbnail.heightAnchor.constraint(equalToConstant: thumbHeight),
+
+            browseSpinner.centerXAnchor.constraint(equalTo: browseThumbnail.centerXAnchor),
+            browseSpinner.centerYAnchor.constraint(equalTo: browseThumbnail.centerYAnchor),
+
+            browseGlyph.leadingAnchor.constraint(equalTo: browseCardView.leadingAnchor, constant: 12),
+            browseGlyph.topAnchor.constraint(equalTo: browseThumbnail.bottomAnchor, constant: 12),
+
+            browseHostLabel.leadingAnchor.constraint(equalTo: browseGlyph.trailingAnchor, constant: 6),
+            browseHostLabel.centerYAnchor.constraint(equalTo: browseGlyph.centerYAnchor),
+
+            browsePill.leadingAnchor.constraint(greaterThanOrEqualTo: browseHostLabel.trailingAnchor, constant: 8),
+            browsePill.trailingAnchor.constraint(equalTo: browseCardView.trailingAnchor, constant: -12),
+            browsePill.centerYAnchor.constraint(equalTo: browseGlyph.centerYAnchor),
+
+            browseCardView.bottomAnchor.constraint(equalTo: browseThumbnail.bottomAnchor, constant: footerHeight),
+
+            modelLabel.leadingAnchor.constraint(equalTo: browseCardView.leadingAnchor),
+            modelLabel.topAnchor.constraint(equalTo: browseCardView.bottomAnchor, constant: 6),
+            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: modelLabel.bottomAnchor, constant: 12),
+        ]
+        NSLayoutConstraint.activate(browseCardConstraints)
+
+        browseHostLabel.text = attachment.displayHost
+
+        // Thumbnail — latest captured screenshot, if any yet.
+        if let path = attachment.latestThumbnailPath,
+           let img = UIImage(contentsOfFile: path) {
+            browseThumbnail.image = img
+        }
+
+        // Status pill.
+        browsePill.text = attachment.pillText.uppercased()
+        browsePill.textInsets = UIEdgeInsets(top: 3, left: 7, bottom: 3, right: 7)
+        switch attachment.status {
+        case .navigating:
+            browsePill.backgroundColor = .systemBlue
+            browseSpinner.isHidden = browseThumbnail.image != nil
+            if browseThumbnail.image == nil { browseSpinner.startAnimating() } else { browseSpinner.stopAnimating() }
+            browseTapRecognizer.isEnabled = true
+        case .reading:
+            browsePill.backgroundColor = .systemIndigo
+            browseSpinner.stopAnimating()
+            browseSpinner.isHidden = true
+            browseTapRecognizer.isEnabled = true
+        case .done:
+            browsePill.backgroundColor = .systemGreen
+            browseSpinner.stopAnimating()
+            browseSpinner.isHidden = true
+            browseTapRecognizer.isEnabled = true
+        case .failed:
+            browsePill.text = "FAILED"
+            browsePill.backgroundColor = .systemRed
+            browseSpinner.stopAnimating()
+            browseSpinner.isHidden = true
+            browseHostLabel.text = attachment.failureReason ?? attachment.displayHost
+            browseTapRecognizer.isEnabled = true
+        }
+
+        baseModelText = modelLabelText
+        modelLabel.text = modelLabelText
+        modelLabel.textColor = .secondaryLabel
+        modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+        modelLabel.numberOfLines = 1
+        ttsIndicator.stopAnimating()
+        ttsIndicator.isHidden = true
+        setNeedsLayout()
+    }
+
+    @objc private func handleBrowseTap() {
+        guard let id = currentBrowseAttachmentId else { return }
+        browseDelegate?.messagingCellDidTapBrowse(attachmentId: id)
+    }
+
+    override func layoutSubviews() {
+        // While a swipe-reveal slide is active, clear the transform BEFORE
+        // super lays out. `UITableViewCell.layoutSubviews` sets
+        // `contentView.frame = bounds`; if the transform is non-identity at
+        // that moment, UIKit shifts the layer's center to compensate, leaving
+        // the transform property set but the visible offset cancelled (which
+        // is why the slide only appeared on release, when the explicit
+        // animation took over). Laying out with an identity transform keeps
+        // the frame clean, then we re-apply the slide on top of it. Only do
+        // this mid-slide so the release spring animation (offset == 0) runs
+        // untouched.
+        if timeRevealOffset != 0 {
+            contentView.transform = .identity
+        }
+        super.layoutSubviews()
+        if timeRevealOffset != 0 {
+            applyTimeRevealTransform()
+        }
+        // CALayer frames aren't driven by Auto Layout — keep the story card's
+        // gradient sized to the card whenever the card is on screen.
+        if !storyCardView.isHidden {
+            storyGradientLayer.frame = storyCardView.bounds
+        }
+    }
+
     private func configureRoundButton(_ button: UIButton,
                                       systemImage: String,
                                       accessibility: String,
@@ -1938,7 +2588,7 @@ class MessagingCell: UITableViewCell {
             return
         }
         currentAttachmentId = attachment.id
-        currentAttachmentFileURL = attachment.fileURL
+        currentAttachmentFileURL = attachment.resolvedFileURL
 
         profileImageView.isHidden = true
         animatingtextView.isHidden = true
@@ -2038,7 +2688,7 @@ class MessagingCell: UITableViewCell {
         // page 1; images get loaded directly. Either way `currentAttachmentId`
         // is the gate against stale callbacks on a recycled cell.
         let id = attachment.id
-        let url = attachment.fileURL
+        let url = attachment.resolvedFileURL
         let kind = attachment.kind
         let pdfSize = CGSize(width: imageSide, height: pdfHeight)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2076,7 +2726,7 @@ class MessagingCell: UITableViewCell {
                                                 accompanyingText: String,
                                                 role: String) {
         currentAttachmentId = attachment.id
-        currentAttachmentFileURL = attachment.fileURL
+        currentAttachmentFileURL = attachment.resolvedFileURL
 
         profileImageView.isHidden = true
         animatingtextView.isHidden = true
@@ -2172,6 +2822,18 @@ class MessagingCell: UITableViewCell {
             return
         }
         presentQuickLook(for: url)
+    }
+
+    /// Share the raw text content of the previewed file.
+    private func handleFilePreviewCardShare() {
+        guard let url = currentAttachmentFileURL,
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8),
+              let presenter = parentViewController else { return }
+        let vc = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        vc.popoverPresentationController?.sourceView = filePreviewCard
+        vc.popoverPresentationController?.sourceRect = filePreviewCard.bounds
+        presenter.present(vc, animated: true)
     }
 
     /// Render page 1 of a PDF as a UIImage sized to fit the bubble. Returns
@@ -2277,8 +2939,363 @@ class MessagingCell: UITableViewCell {
         ttsIndicator.isHidden = true
     }
 
+    // MARK: - Inline image-gallery rendering (web image search)
+
+    /// Lay out the web image-search results as a horizontally-scrolling strip
+    /// of square thumbnails on the assistant side. Thumbnails load lazily from
+    /// their remote URLs (URLSession + shared URLCache); a recycled cell's
+    /// stale loads are dropped via `galleryLoadToken`. Tapping a thumbnail
+    /// opens the full-resolution image in a zoomable viewer.
+    private func applyImageGalleryAttachment(_ attachment: ImageGalleryAttachment,
+                                             modelLabelText: String) {
+        currentGalleryAttachmentId = attachment.id
+
+        profileImageView.isHidden = true
+        textView.isHidden = true
+        animatingtextView.isHidden = true
+        actionButton.isHidden = true
+        shimmerLabel.isHidden = true
+        modelLabel.isHidden = false
+
+        if galleryScrollView.superview == nil {
+            self.addViews(views: [galleryTitleLabel, galleryScrollView])
+            galleryScrollView.addSubview(galleryStack)
+            NSLayoutConstraint.activate([
+                galleryStack.leadingAnchor.constraint(equalTo: galleryScrollView.contentLayoutGuide.leadingAnchor),
+                galleryStack.trailingAnchor.constraint(equalTo: galleryScrollView.contentLayoutGuide.trailingAnchor),
+                galleryStack.topAnchor.constraint(equalTo: galleryScrollView.contentLayoutGuide.topAnchor),
+                galleryStack.bottomAnchor.constraint(equalTo: galleryScrollView.contentLayoutGuide.bottomAnchor),
+                galleryStack.heightAnchor.constraint(equalTo: galleryScrollView.frameLayoutGuide.heightAnchor),
+            ])
+        }
+
+        let query = attachment.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasTitle = !query.isEmpty
+        if hasTitle {
+            galleryTitleLabel.text = query
+            galleryTitleLabel.isHidden = false
+        } else {
+            galleryTitleLabel.isHidden = true
+            galleryTitleLabel.text = nil
+        }
+        galleryScrollView.isHidden = false
+
+        // Rebuild tiles. A new render token invalidates any in-flight loads
+        // from a prior configuration of this (recycled) cell.
+        galleryLoadToken &+= 1
+        let token = galleryLoadToken
+        galleryOriginalURLs.removeAll()
+        for tile in galleryStack.arrangedSubviews {
+            galleryStack.removeArrangedSubview(tile)
+            tile.removeFromSuperview()
+        }
+
+        let side = MessagingCell.galleryThumbSide
+        for (index, item) in attachment.items.enumerated() {
+            let tile = makeGalleryTile(side: side, tag: index)
+            galleryStack.addArrangedSubview(tile)
+            if let original = URL(string: item.originalURL) {
+                galleryOriginalURLs[index] = original
+            }
+            if let thumbURL = URL(string: item.thumbnailURL) {
+                loadGalleryThumbnail(thumbURL, into: tile, token: token)
+            }
+        }
+
+        galleryConstraints = [
+            galleryScrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            galleryScrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            galleryScrollView.heightAnchor.constraint(equalToConstant: side),
+
+            modelLabel.leadingAnchor.constraint(equalTo: galleryScrollView.leadingAnchor),
+            modelLabel.topAnchor.constraint(equalTo: galleryScrollView.bottomAnchor, constant: 6),
+            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: modelLabel.bottomAnchor, constant: 12),
+        ]
+        if hasTitle {
+            galleryConstraints.append(contentsOf: [
+                galleryTitleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+                galleryTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20),
+                galleryTitleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+                galleryScrollView.topAnchor.constraint(equalTo: galleryTitleLabel.bottomAnchor, constant: 8),
+            ])
+        } else {
+            galleryConstraints.append(
+                galleryScrollView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
+            )
+        }
+        NSLayoutConstraint.activate(galleryConstraints)
+
+        baseModelText = modelLabelText
+        modelLabel.text = modelLabelText
+        modelLabel.textColor = .secondaryLabel
+        modelLabel.font = UIFont.preferredFont(forTextStyle: .caption2)
+        modelLabel.numberOfLines = 1
+        ttsIndicator.stopAnimating()
+        ttsIndicator.isHidden = true
+    }
+
+    /// Build one square thumbnail tile (an image view + spinner) tagged with
+    /// its index so the tap handler can resolve the full-resolution URL.
+    private func makeGalleryTile(side: CGFloat, tag: Int) -> UIImageView {
+        let iv = UIImageView()
+        iv.tag = tag
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        iv.contentMode = .scaleAspectFill
+        iv.clipsToBounds = true
+        iv.layer.cornerRadius = 12
+        iv.layer.borderWidth = 1
+        iv.layer.borderColor = UIColor.systemFill.cgColor
+        iv.backgroundColor = .secondarySystemBackground
+        iv.isUserInteractionEnabled = true
+        NSLayoutConstraint.activate([
+            iv.widthAnchor.constraint(equalToConstant: side),
+            iv.heightAnchor.constraint(equalToConstant: side),
+        ])
+        let spinner = UIActivityIndicatorView(style: .medium)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.color = .secondaryLabel
+        spinner.startAnimating()
+        iv.addSubview(spinner)
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: iv.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: iv.centerYAnchor),
+        ])
+        iv.addGestureRecognizer(
+            UITapGestureRecognizer(target: self, action: #selector(handleGalleryThumbTap(_:)))
+        )
+        return iv
+    }
+
+    /// Fetch a thumbnail off the main thread and paint it only if this cell is
+    /// still showing the same gallery render (token match).
+    private func loadGalleryThumbnail(_ url: URL, into tile: UIImageView, token: Int) {
+        URLSession.shared.dataTask(with: url) { [weak self, weak tile] data, _, _ in
+            guard let data = data, let image = UIImage(data: data) else { return }
+            DispatchQueue.main.async {
+                guard let self = self, let tile = tile,
+                      self.galleryLoadToken == token else { return }
+                // Drop the spinner once the image lands.
+                for sub in tile.subviews where sub is UIActivityIndicatorView {
+                    (sub as? UIActivityIndicatorView)?.stopAnimating()
+                    sub.removeFromSuperview()
+                }
+                tile.image = image
+            }
+        }.resume()
+    }
+
+    @objc private func handleGalleryThumbTap(_ recognizer: UITapGestureRecognizer) {
+        guard let tile = recognizer.view as? UIImageView,
+              galleryOriginalURLs[tile.tag] != nil,
+              let presenter = parentViewController else { return }
+        // Build the ordered list of full-resolution URLs so the viewer can
+        // page (swipe) between all results, starting at the tapped one.
+        let ordered = galleryOriginalURLs.keys.sorted()
+        let urls = ordered.compactMap { galleryOriginalURLs[$0] }
+        let startIndex = ordered.firstIndex(of: tile.tag) ?? 0
+        let viewer = RemoteImageGalleryViewerController(imageURLs: urls,
+                                                        startIndex: startIndex,
+                                                        startPlaceholder: tile.image)
+        viewer.modalPresentationStyle = .fullScreen
+        presenter.present(viewer, animated: true)
+    }
+
     required init?(coder: NSCoder) {
         fatalError()
+    }
+}
+
+/// Marker subclass for the image-search gallery's horizontal scroller. Lets
+/// `MessagingVC`'s swipe-to-reveal-timestamp pan ignore touches that land
+/// inside a gallery, so horizontally swiping the thumbnails scrolls them
+/// instead of dragging the whole transcript to reveal timestamps.
+final class ImageGalleryScrollView: UIScrollView {}
+
+// MARK: - Remote full-screen image viewer (swipeable gallery)
+
+/// Full-screen viewer that pages (swipes) between the image-search results,
+/// each page pinch-to-zoomable. Opens on the tapped image and shows a
+/// "n of N" position indicator. Tap (when not zoomed) or Done dismisses.
+private final class RemoteImageGalleryViewerController: UIPageViewController,
+                                                        UIPageViewControllerDataSource,
+                                                        UIPageViewControllerDelegate {
+    private let imageURLs: [URL]
+    private var currentIndex: Int
+    private let startPlaceholder: UIImage?
+    private let counterLabel = UILabel()
+
+    init(imageURLs: [URL], startIndex: Int, startPlaceholder: UIImage?) {
+        self.imageURLs = imageURLs
+        self.currentIndex = min(max(0, startIndex), max(0, imageURLs.count - 1))
+        self.startPlaceholder = startPlaceholder
+        super.init(transitionStyle: .scroll,
+                   navigationOrientation: .horizontal,
+                   options: [.interPageSpacing: 16])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        dataSource = self
+        delegate = self
+
+        let first = makePage(index: currentIndex, placeholder: startPlaceholder)
+        setViewControllers([first], direction: .forward, animated: false)
+
+        let done = UIButton(type: .system)
+        done.translatesAutoresizingMaskIntoConstraints = false
+        done.setTitle("Done", for: .normal)
+        done.setTitleColor(.white, for: .normal)
+        done.titleLabel?.font = UIFont.systemFont(ofSize: 17, weight: .semibold)
+        done.addTarget(self, action: #selector(dismissSelf), for: .touchUpInside)
+        view.addSubview(done)
+
+        counterLabel.translatesAutoresizingMaskIntoConstraints = false
+        counterLabel.textColor = .white
+        counterLabel.font = UIFont.systemFont(ofSize: 15, weight: .medium)
+        counterLabel.textAlignment = .center
+        view.addSubview(counterLabel)
+
+        NSLayoutConstraint.activate([
+            done.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            done.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            counterLabel.centerYAnchor.constraint(equalTo: done.centerYAnchor),
+            counterLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+        ])
+        updateCounter()
+    }
+
+    private func makePage(index: Int, placeholder: UIImage?) -> RemoteImagePageController {
+        let page = RemoteImagePageController(imageURL: imageURLs[index],
+                                             pageIndex: index,
+                                             placeholder: placeholder)
+        page.onTapWhileUnzoomed = { [weak self] in self?.dismissSelf() }
+        return page
+    }
+
+    private func updateCounter() {
+        counterLabel.isHidden = imageURLs.count <= 1
+        counterLabel.text = "\(currentIndex + 1) of \(imageURLs.count)"
+    }
+
+    @objc private func dismissSelf() { dismiss(animated: true) }
+
+    // MARK: UIPageViewControllerDataSource
+
+    func pageViewController(_ pageViewController: UIPageViewController,
+                            viewControllerBefore viewController: UIViewController) -> UIViewController? {
+        guard let page = viewController as? RemoteImagePageController,
+              page.pageIndex > 0 else { return nil }
+        return makePage(index: page.pageIndex - 1, placeholder: nil)
+    }
+
+    func pageViewController(_ pageViewController: UIPageViewController,
+                            viewControllerAfter viewController: UIViewController) -> UIViewController? {
+        guard let page = viewController as? RemoteImagePageController,
+              page.pageIndex < imageURLs.count - 1 else { return nil }
+        return makePage(index: page.pageIndex + 1, placeholder: nil)
+    }
+
+    func pageViewController(_ pageViewController: UIPageViewController,
+                            didFinishAnimating finished: Bool,
+                            previousViewControllers: [UIViewController],
+                            transitionCompleted completed: Bool) {
+        guard completed,
+              let page = viewControllers?.first as? RemoteImagePageController else { return }
+        currentIndex = page.pageIndex
+        updateCounter()
+    }
+}
+
+/// One pinch-to-zoom page in `RemoteImageGalleryViewerController`. Shows a
+/// placeholder thumbnail immediately (when provided), then swaps in the
+/// full-resolution image once it downloads.
+private final class RemoteImagePageController: UIViewController, UIScrollViewDelegate {
+    let pageIndex: Int
+    /// Invoked on a single tap when the image is not zoomed in — the container
+    /// uses it to dismiss.
+    var onTapWhileUnzoomed: (() -> Void)?
+
+    private let imageURL: URL
+    private let placeholder: UIImage?
+    private let scrollView = UIScrollView()
+    private let imageView = UIImageView()
+    private let spinner = UIActivityIndicatorView(style: .large)
+
+    init(imageURL: URL, pageIndex: Int, placeholder: UIImage?) {
+        self.imageURL = imageURL
+        self.pageIndex = pageIndex
+        self.placeholder = placeholder
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 4
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        view.addSubview(scrollView)
+
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.contentMode = .scaleAspectFit
+        imageView.image = placeholder
+        scrollView.addSubview(imageView)
+
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.color = .white
+        spinner.startAnimating()
+        view.addSubview(spinner)
+
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+            imageView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            imageView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            imageView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
+
+            spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        view.addGestureRecognizer(tap)
+
+        loadFullImage()
+    }
+
+    private func loadFullImage() {
+        URLSession.shared.dataTask(with: imageURL) { [weak self] data, _, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.spinner.stopAnimating()
+                if let data = data, let image = UIImage(data: data) {
+                    self.imageView.image = image
+                }
+            }
+        }.resume()
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+    @objc private func handleTap() {
+        // Don't dismiss while zoomed in — let the tap interact with the image.
+        guard scrollView.zoomScale <= scrollView.minimumZoomScale else { return }
+        onTapWhileUnzoomed?()
     }
 }
 
@@ -2451,6 +3468,10 @@ final class FilePreviewCardView: UIView {
     /// QuickLook).
     var onTap: (() -> Void)?
 
+    /// Invoked when the user taps the Share button on the card. The host
+    /// reads the full file content and presents the share sheet.
+    var onShare: (() -> Void)?
+
     /// Apply visual state for `attachment`. Call again with a new attachment
     /// to repurpose a recycled card; call `reset()` before the cell is
     /// re-rendered with a non-card attachment kind.
@@ -2460,7 +3481,7 @@ final class FilePreviewCardView: UIView {
         // Bytes is best-effort; failure just hides the size suffix rather
         // than the whole subtitle (we still want the MIME-ish label).
         let sizeText: String?
-        if let bytes = (try? attachment.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
+        if let bytes = (try? attachment.resolvedFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
             sizeText = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
         } else {
             sizeText = nil
@@ -2474,6 +3495,8 @@ final class FilePreviewCardView: UIView {
             badgeLabel.isHidden = false
             subtitleLabel.text = Self.subtitle("Markdown", size: sizeText)
             applyMarkdownSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .text:
             iconView.image = UIImage(systemName: "chevron.left.forwardslash.chevron.right")
             iconView.tintColor = .secondaryLabel
@@ -2486,6 +3509,8 @@ final class FilePreviewCardView: UIView {
                 subtitleLabel.text = Self.subtitle("Text", size: sizeText)
             }
             applyCodeSnippet(attachment.extractedText ?? "")
+            shareRow.isHidden = false
+            shareRowCollapsed.isActive = false
         case .generic:
             iconView.image = UIImage(systemName: "doc")
             iconView.tintColor = .secondaryLabel
@@ -2504,6 +3529,8 @@ final class FilePreviewCardView: UIView {
             snippetLabel.attributedText = nil
             snippetLabel.text = nil
             snippetLabel.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         case .image, .pdf:
             // Shouldn't happen — the cell never routes image/PDF through
             // this view — but render a sensible placeholder if it does.
@@ -2512,6 +3539,8 @@ final class FilePreviewCardView: UIView {
             badgeLabel.isHidden = true
             subtitleLabel.text = Self.subtitle(attachment.mimeType, size: sizeText)
             snippetLabel.isHidden = true
+            shareRow.isHidden = true
+            shareRowCollapsed.isActive = true
         }
     }
 
@@ -2527,6 +3556,8 @@ final class FilePreviewCardView: UIView {
         snippetLabel.text = nil
         snippetLabel.isHidden = false
         iconView.image = nil
+        shareRow.isHidden = true
+        shareRowCollapsed.isActive = true
     }
 
     // MARK: - Subviews
@@ -2537,6 +3568,20 @@ final class FilePreviewCardView: UIView {
     private let subtitleLabel = UILabel()
     private let snippetLabel = UILabel()
     private let headerStack = UIStackView()
+    private let shareRow = UIView()
+    private let shareRowSeparator = UIView()
+    private lazy var shareRowCollapsed: NSLayoutConstraint = shareRow.heightAnchor.constraint(equalToConstant: 0)
+    private let shareButton: UIButton = {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "square.and.arrow.up")
+        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 13, weight: .medium)
+        config.baseForegroundColor = .secondaryLabel
+        config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10)
+        let b = UIButton(configuration: config)
+        b.accessibilityLabel = "Share"
+        return b
+    }()
 
     // MARK: - Setup
 
@@ -2602,9 +3647,34 @@ final class FilePreviewCardView: UIView {
         headerStack.addArrangedSubview(titleLabel)
         headerStack.addArrangedSubview(badgeLabel)
 
+        // Share row — separator + button, hidden until configured for a
+        // text-based kind (markdown/source/text).
+        shareRow.translatesAutoresizingMaskIntoConstraints = false
+        shareRow.isHidden = true
+
+        shareRowSeparator.translatesAutoresizingMaskIntoConstraints = false
+        shareRowSeparator.backgroundColor = .separator
+        shareRow.addSubview(shareRowSeparator)
+
+        shareButton.translatesAutoresizingMaskIntoConstraints = false
+        shareButton.addTarget(self, action: #selector(handleShareTap), for: .touchUpInside)
+        shareRow.addSubview(shareButton)
+
+        NSLayoutConstraint.activate([
+            shareRowSeparator.topAnchor.constraint(equalTo: shareRow.topAnchor),
+            shareRowSeparator.leadingAnchor.constraint(equalTo: shareRow.leadingAnchor),
+            shareRowSeparator.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor),
+            shareRowSeparator.heightAnchor.constraint(equalToConstant: 1.0 / UIScreen.main.scale),
+
+            shareButton.topAnchor.constraint(equalTo: shareRowSeparator.bottomAnchor, constant: 2),
+            shareButton.trailingAnchor.constraint(equalTo: shareRow.trailingAnchor, constant: -4),
+            shareButton.bottomAnchor.constraint(equalTo: shareRow.bottomAnchor, constant: -2),
+        ])
+
         addSubview(headerStack)
         addSubview(subtitleLabel)
         addSubview(snippetLabel)
+        addSubview(shareRow)
 
         NSLayoutConstraint.activate([
             iconView.widthAnchor.constraint(equalToConstant: 16),
@@ -2621,25 +3691,34 @@ final class FilePreviewCardView: UIView {
             snippetLabel.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 8),
             snippetLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             snippetLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            snippetLabel.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+
+            shareRow.topAnchor.constraint(equalTo: snippetLabel.bottomAnchor, constant: 8),
+            shareRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shareRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shareRow.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
         ])
 
-        // Drive the bottom edge off whichever element is the lowest visible
-        // one. snippetLabel-bottom is `lessThanOrEqualTo` above so it
-        // doesn't *force* height; this constraint pulls the bottom up when
-        // the snippet collapses, keeping the generic-card chip-sized.
-        let bottomEqual = bottomAnchor.constraint(equalTo: snippetLabel.bottomAnchor, constant: 12)
-        bottomEqual.priority = .defaultHigh
-        bottomEqual.isActive = true
+        // Drive the bottom edge. When the share row is visible it's the
+        // lowest element; otherwise snippet or subtitle drives height.
+        let shareRowBottom = bottomAnchor.constraint(equalTo: shareRow.bottomAnchor)
+        shareRowBottom.priority = UILayoutPriority(751)
+        shareRowBottom.isActive = true
+        let snippetBottom = bottomAnchor.constraint(equalTo: snippetLabel.bottomAnchor, constant: 12)
+        snippetBottom.priority = .defaultHigh
+        snippetBottom.isActive = true
         let subtitleBottomEqual = bottomAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12)
         subtitleBottomEqual.priority = .defaultLow
         subtitleBottomEqual.isActive = true
+
+        shareRow.clipsToBounds = true
+        shareRowCollapsed.isActive = true
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
         addGestureRecognizer(tap)
     }
 
     @objc private func handleTap() { onTap?() }
+    @objc private func handleShareTap() { onShare?() }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
         super.traitCollectionDidChange(previous)

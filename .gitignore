@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 Secrets.xcconfig
+Secrets_managed.xcconfig
 *.secrets.xcconfig
 *.p12
 *.mobileprovision
@@ -25,6 +26,9 @@ xcuserdata/
 *.dSYM.zip
 *.dSYM
 *.swiftpm
+# Built app bundles / disk images bake in build-time secrets — never commit
+*.app/
+*.dmg
 
 # ─── macOS ────────────────────────────────────────────────────────────
 .DS_Store

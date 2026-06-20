@@ -44,6 +44,13 @@ final class KeyStore {
         case xAccessToken           = "X_ACCESS_TOKEN"
         case xAccessTokenSecret     = "X_ACCESS_TOKEN_SECRET"
         case sfBayTransit           = "SF_BAY_511_API_KEY"
+        case googleWorkspaceAccessToken  = "GOOGLE_WORKSPACE_ACCESS_TOKEN"
+        case googleWorkspaceRefreshToken = "GOOGLE_WORKSPACE_REFRESH_TOKEN"
+        case googleWorkspaceClientId     = "GOOGLE_WORKSPACE_CLIENT_ID"
+        case googleWorkspaceClientSecret = "GOOGLE_WORKSPACE_CLIENT_SECRET"
+        case agentMail                   = "AGENT_MAIL_API_KEY"
+        case agentMailInbox              = "AGENT_MAIL_INBOX"
+        case serpAPI                     = "SERPAPI_API_KEY"
 
         /// User-facing label shown in Settings.
         var displayName: String {
@@ -69,6 +76,13 @@ final class KeyStore {
             case .xAccessToken:           return "X Access Token"
             case .xAccessTokenSecret:     return "X Access Token Secret"
             case .sfBayTransit:           return "511 SF Bay API Key"
+            case .googleWorkspaceAccessToken:  return "Google Workspace Access Token"
+            case .googleWorkspaceRefreshToken: return "Google Workspace Refresh Token"
+            case .googleWorkspaceClientId:     return "Google Workspace Client ID"
+            case .googleWorkspaceClientSecret: return "Google Workspace Client Secret"
+            case .agentMail:                   return "AgentMail API Key"
+            case .agentMailInbox:              return "AgentMail Inbox"
+            case .serpAPI:                     return "SerpAPI Key"
             }
         }
 
@@ -96,6 +110,13 @@ final class KeyStore {
             case .xAccessToken:           return "User-level access token with read+write permission from developer.x.com"
             case .xAccessTokenSecret:     return "User-level access token secret — shown once at generation time"
             case .sfBayTransit:           return "Free API token from 511.org/open-data/token — powers real-time Muni arrival predictions"
+            case .googleWorkspaceAccessToken:  return "OAuth2 access token from Google Cloud Console · powers Drive, Gmail, Calendar"
+            case .googleWorkspaceRefreshToken: return "Optional. OAuth2 refresh token — lets the app request a new access token when the current one expires"
+            case .googleWorkspaceClientId:     return "Optional. OAuth2 client id from Google Cloud Console — needed for token refresh"
+            case .googleWorkspaceClientSecret: return "Optional. OAuth2 client secret from Google Cloud Console — needed for token refresh"
+            case .agentMail:                   return "am_… key from agentmail.to · lets Loop read its inbox and send email (with attachments) on your behalf"
+            case .agentMailInbox:              return "Optional. The inbox to send from, e.g. loop_email@agentmail.to. Leave blank and Loop will reuse your first inbox or create one automatically."
+            case .serpAPI:                     return "Free key from serpapi.com → powers web image search (Google Images)"
             }
         }
     }
@@ -111,6 +132,9 @@ final class KeyStore {
         case github, slack, notion, obsidian
         case twitter
         case sfBayTransit
+        case googleWorkspace
+        case agentMail
+        case serpAPI
 
         /// Row title in the list + window title in the editor.
         var displayName: String {
@@ -129,6 +153,9 @@ final class KeyStore {
             case .obsidian:   return "Obsidian"
             case .twitter:    return "X (Twitter)"
             case .sfBayTransit: return "511 SF Bay"
+            case .googleWorkspace: return "Google Workspace"
+            case .agentMail:    return "AgentMail"
+            case .serpAPI:      return "SerpAPI"
             }
         }
 
@@ -152,6 +179,9 @@ final class KeyStore {
             case .obsidian:   return "Read and write your Obsidian vault through a self-hosted relay"
             case .twitter:    return "Post tweets to X (Twitter) with OAuth 1.0a"
             case .sfBayTransit: return "Real-time SF Muni bus/train arrival predictions via the 511 API"
+            case .googleWorkspace: return "Google Drive, Gmail, and Calendar via OAuth2 access token"
+            case .agentMail:    return "Read Loop's email inbox and send email (with attachments) via agentmail.to"
+            case .serpAPI:      return "Search the web for images (Google Images) and render them inline"
             }
         }
 
@@ -176,6 +206,9 @@ final class KeyStore {
             case .obsidian:   return [.obsidianAPI, .obsidianBaseURL, .obsidianVaultName]
             case .twitter:    return [.xAPIKey, .xAPISecret, .xAccessToken, .xAccessTokenSecret]
             case .sfBayTransit: return [.sfBayTransit]
+            case .googleWorkspace: return [.googleWorkspaceAccessToken, .googleWorkspaceRefreshToken, .googleWorkspaceClientId, .googleWorkspaceClientSecret]
+            case .agentMail:    return [.agentMail, .agentMailInbox]
+            case .serpAPI:      return [.serpAPI]
             }
         }
 
@@ -297,7 +330,7 @@ final class KeyStore {
         // hide and the URL is the whole point. Same for the Devin org id,
         // which is a `org-…` identifier (not a secret) the user needs to be
         // able to read back when verifying their setup.
-        if key == .obsidianBaseURL || key == .obsidianVaultName || key == .githubBaseURL || key == .devinOrgID {
+        if key == .obsidianBaseURL || key == .obsidianVaultName || key == .githubBaseURL || key == .devinOrgID || key == .agentMailInbox {
             return raw
         }
         let suffixLen = 4

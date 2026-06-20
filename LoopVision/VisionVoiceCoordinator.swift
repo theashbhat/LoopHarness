@@ -337,6 +337,7 @@ final class VisionVoiceCoordinator {
         audioEngine = nil
         deepgramSTT?.disconnect(); deepgramSTT = nil
         appleSTT?.cancel(); appleSTT = nil
+        deactivateAudioSession()
     }
 
     // MARK: - Transcript → Cloud → store → speak
@@ -513,7 +514,10 @@ final class VisionVoiceCoordinator {
                     // a late failure mid-stream). Do NOT fall back — that
                     // would replay the whole reply on top of what was heard.
                     self.speechToken = nil
-                    if self.state == .speaking { self.state = .idle }
+                    if self.state == .speaking {
+                        self.state = .idle
+                        self.deactivateAudioSession()
+                    }
                 } else {
                     // True failure before any audio (bad key, blocked
                     // network, Aura down) — the system voice is the safety net.
@@ -530,7 +534,10 @@ final class VisionVoiceCoordinator {
                 guard self.deepgramTTS === tts else { return }
                 self.deepgramTTS = nil
                 self.speechToken = nil
-                if self.state == .speaking { self.state = .idle }
+                if self.state == .speaking {
+                    self.state = .idle
+                    self.deactivateAudioSession()
+                }
             }
         }
 
@@ -550,7 +557,21 @@ final class VisionVoiceCoordinator {
     }
 
     fileprivate func speechDidFinish() {
-        if state == .speaking { state = .idle }
+        if state == .speaking {
+            state = .idle
+            deactivateAudioSession()
+        }
+    }
+
+    /// Deactivate the audio session with `.notifyOthersOnDeactivation` so
+    /// system media (Apple Music, Spotify, podcasts) auto-resumes after
+    /// Loop's voice activity ends. visionOS has AVAudioSession (unlike macOS).
+    private func deactivateAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        } catch {
+            // best-effort; session may already be inactive
+        }
     }
 
     // MARK: - Conversation selection (drives the split-view window)

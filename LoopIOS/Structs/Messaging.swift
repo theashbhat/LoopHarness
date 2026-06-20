@@ -138,6 +138,20 @@ struct MessageStruct {
     /// `show_places_on_map`. Cell renders an inline MKMapView with annotations
     /// that callout to Apple Maps. Synchronous — no `.generating` lifecycle.
     var mapAttachment: MapAttachment? = nil
+    /// Gallery of web image-search results, set by `SerpImageSearchSkill` when
+    /// the model calls `image_search`. Cell renders a horizontal thumbnail
+    /// strip; tap opens the full image. Synchronous — no `.generating`
+    /// lifecycle (mirrors `mapAttachment`).
+    var imageGalleryAttachment: ImageGalleryAttachment? = nil
+    /// HTML story infographic (1080×1920 portrait). Set by StoryGenerationService
+    /// when the model calls `generate_story`. Renders as a scaled card in chat;
+    /// tap opens the full-screen story player with tap-to-advance navigation.
+    var storyAttachment: StoryAttachment? = nil
+    /// Live/replayable browse session (WebKit driver). Set by
+    /// BrowseGenerationService when the model calls `browse`. Renders as a live
+    /// preview card in chat; tap opens the full-screen read-only live view, and
+    /// once the session ends the card flips into a scrubbable replay.
+    var browseAttachment: BrowseAttachment? = nil
     /// Set when this message belongs to the conversational onboarding flow.
     /// Drives `MessagingCell` to render an interactive card (text field,
     /// choice buttons, key paste, etc.) under the message body. Onboarding
@@ -164,6 +178,16 @@ struct MessageStruct {
     /// name (e.g. "GPT-5.5 2.6s"). `nil` for on-device Apple responses,
     /// non-streaming paths, and older persisted messages.
     var ttft: TimeInterval? = nil
+    /// When this message was posted. Defaults to the moment the struct is
+    /// created (i.e. when a live message is sent/received); reload overrides it
+    /// with the persisted `SimpleMessage.createdAt` in `messageStruct(from:)`.
+    /// Surfaced by the iMessage-style swipe-left timestamp reveal in the chat.
+    var timestamp: Date = Date()
+
+    /// Speech-to-text engine that produced this message when it was dictated
+    /// ("Deepgram STT" / "Apple STT"). `nil` for typed messages and any
+    /// non-voice path. Surfaced as a small byline under the user's bubble.
+    var sttEngine: String? = nil
 
     /// Explicit init that still accepts `function:` as a singular optional —
     /// keeps existing call sites compiling now that `function` is a computed
@@ -182,10 +206,15 @@ struct MessageStruct {
          pdfAttachment: PDFAttachment? = nil,
          fileAttachment: FileAttachment? = nil,
          mapAttachment: MapAttachment? = nil,
+         imageGalleryAttachment: ImageGalleryAttachment? = nil,
+         storyAttachment: StoryAttachment? = nil,
+         browseAttachment: BrowseAttachment? = nil,
          onboardingCard: OnboardingCardKind? = nil,
          reasoningContent: String? = nil,
          tokenUsage: TokenUsage? = nil,
-         ttft: TimeInterval? = nil) {
+         ttft: TimeInterval? = nil,
+         timestamp: Date = Date(),
+         sttEngine: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -205,10 +234,15 @@ struct MessageStruct {
         self.pdfAttachment = pdfAttachment
         self.fileAttachment = fileAttachment
         self.mapAttachment = mapAttachment
+        self.imageGalleryAttachment = imageGalleryAttachment
+        self.storyAttachment = storyAttachment
+        self.browseAttachment = browseAttachment
         self.onboardingCard = onboardingCard
         self.reasoningContent = reasoningContent
         self.tokenUsage = tokenUsage
         self.ttft = ttft
+        self.timestamp = timestamp
+        self.sttEngine = sttEngine
     }
 
     /// Generic JSON representation of the message. Provider-specific chat
@@ -280,6 +314,16 @@ struct FileAttachment: Codable {
     /// cap (`extractedTextCharCap`) to keep the chat payload reasonable. Nil
     /// for images (Vision OCR runs but may yield nothing) and `.generic`.
     var extractedText: String?
+    /// For `.image` kind only: a one-time, model-generated prose description of
+    /// the image, produced lazily in the background by `VisionSummaryService`
+    /// after the image's first send. Once present, the local chat clients stop
+    /// re-sending the raw base64 image on subsequent turns and inline this
+    /// description instead (see `AnthropicChat.wirePayload` / `OpenAIChat`),
+    /// which saves the image's input tokens on every turn after the first.
+    /// Nil until generated (or if generation failed and no OCR fallback). Being
+    /// `Optional`, it decodes to nil for messages persisted before this field
+    /// existed — no migration required.
+    var visionSummary: String?
 
     init(id: String = UUID().uuidString,
          fileURL: URL,
@@ -289,7 +333,8 @@ struct FileAttachment: Codable {
          languageTag: String? = nil,
          status: Status = .ready,
          failureReason: String? = nil,
-         extractedText: String? = nil) {
+         extractedText: String? = nil,
+         visionSummary: String? = nil) {
         self.id = id
         self.fileURL = fileURL
         self.fileName = fileName
@@ -299,6 +344,26 @@ struct FileAttachment: Codable {
         self.status = status
         self.failureReason = failureReason
         self.extractedText = extractedText
+        self.visionSummary = visionSummary
+    }
+
+    /// The attachment's file re-anchored to the *current* workspace root.
+    ///
+    /// `fileURL` is persisted as an absolute path, but on iOS the app's data
+    /// container UUID changes between installs / rebuilds, so a `fileURL` saved
+    /// in a previous container points at a directory that no longer exists.
+    /// Every attachment lives at `<workspace>/attachments/<name>`, so when the
+    /// stored absolute path is missing we re-derive it under the live
+    /// `Workspace.shared.rootURL`. Use this — not `fileURL` — anywhere the
+    /// bytes are actually read (open / preview / thumbnail / share); `fileURL`
+    /// stays the source of truth for persistence and the assistant hint.
+    var resolvedFileURL: URL {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: fileURL.path) { return fileURL }
+        let reAnchored = Workspace.shared.rootURL
+            .appendingPathComponent("attachments", isDirectory: true)
+            .appendingPathComponent(fileURL.lastPathComponent)
+        return fm.fileExists(atPath: reAnchored.path) ? reAnchored : fileURL
     }
 
     /// Maximum number of characters from `extractedText` to inline in a
@@ -325,6 +390,24 @@ struct FileAttachment: Codable {
     /// like the local variant. See `OpenClawConversationStore.prepareRemoteAttachment`.
     func remoteHint(workspaceRelPath: String) -> String {
         hint(header: "[Attached file: \(fileName) (\(kindLabel)) — saved in your workspace at \(workspaceRelPath). Open/read it to view its contents.]")
+    }
+
+    /// Text block that replaces the raw base64 image on every turn *after* the
+    /// one that introduced it. The model saw the actual image on the turn it
+    /// was sent; on later turns we hand it this `visionSummary` instead so we
+    /// don't re-transmit the image's tokens. Returns nil when no summary has
+    /// been generated yet — callers then fall back to re-sending the raw image
+    /// so the model never silently loses sight of it. See
+    /// `AnthropicChat.wirePayload` / `OpenAIChat`.
+    var imageSummaryHint: String? {
+        guard kind == .image, let summary = visionSummary, !summary.isEmpty else { return nil }
+        let workspaceRelative = fileURL.lastPathComponent
+        return """
+        [Image: \(fileName) — shown to you in full on an earlier turn; a text description follows so it needn't be re-sent. Original at workspace://attachments/\(workspaceRelative).]
+        [Image description begin]
+        \(summary)
+        [Image description end]
+        """
     }
 
     /// Short label for this attachment's kind, used in the hint header.
@@ -497,6 +580,40 @@ struct MapAttachment: Codable, Equatable {
     }
 }
 
+/// Set of remote images returned by `SerpImageSearchSkill` (Google Images via
+/// SerpAPI). Rendered as a horizontal thumbnail gallery in the chat cell;
+/// tapping a thumbnail opens the full-resolution image. Synchronous — the
+/// search returns all URLs in one call, so (like `MapAttachment`) there is no
+/// `.generating` lifecycle. Thumbnails load lazily inside the cell.
+struct ImageGalleryAttachment: Codable, Equatable {
+    struct Item: Codable, Equatable {
+        /// Small image URL used for the thumbnail grid.
+        let thumbnailURL: String
+        /// Full-resolution image URL opened on tap.
+        let originalURL: String
+        /// Source page the image was found on (for attribution / "view source").
+        let sourceLink: String?
+        /// Short image title from the search result.
+        let title: String?
+    }
+
+    let id: String
+    /// The search query that produced these results (shown as a caption).
+    let query: String
+    let items: [Item]
+    var conversationId: String?
+
+    init(id: String = UUID().uuidString,
+         query: String,
+         items: [Item],
+         conversationId: String? = nil) {
+        self.id = id
+        self.query = query
+        self.items = items
+        self.conversationId = conversationId
+    }
+}
+
 /// Interactive card rendered under an onboarding message in `MessagingCell`.
 /// The script (in `OnboardingCoordinator`) drives which card to attach to each
 /// turn; the cell switches on the case to build the right UI. Equatable so the
@@ -555,7 +672,9 @@ var tools: [[String: Any]] = {
     all += NotionSkill.tools
     all += SlackSkill.tools
     all += SchedulerSkill.tools
+    all += VMCronSkill.tools
     all += ExaSkill.tools
+    all += SerpImageSearchSkill.tools
     all += URLFetchSkill.tools
     all += GitSkill.tools
     all += GitHubSkill.tools
@@ -564,6 +683,7 @@ var tools: [[String: Any]] = {
     all += SpecBuilderSkill.tools
     all += LocationSkill.tools
     all += MapsSkill.tools
+    all += GeocodingSkill.tools
     all += ImageSkill.tools
     all += PDFSkill.tools
     all += ObsidianSkill.tools
@@ -578,8 +698,19 @@ var tools: [[String: Any]] = {
     all += TwitterSkill.tools
     all += SSHSkill.tools
     all += MuniRealtimeSkill.tools
+    all += CardSkill.tools
+    all += GoogleDriveSkill.tools
+    all += GoogleGmailSkill.tools
+    all += GoogleCalendarSkill.tools
+    all += AgentMailSkill.tools
     #if canImport(HealthKit) && os(iOS)
     all += HealthSkill.tools
+    #endif
+    #if os(iOS) || os(macOS)
+    all += StorySkill.tools
+    #endif
+    #if os(iOS)
+    all += BrowseSkill.tools
     #endif
     // Dynamic, user-authored skills get appended in AgentHarness at every
     // chat turn so newly hot-loaded skills become visible without restart.

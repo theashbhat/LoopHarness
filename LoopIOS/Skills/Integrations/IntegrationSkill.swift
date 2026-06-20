@@ -48,7 +48,7 @@ final class IntegrationSkill {
 
     static let systemPromptFragment: String = """
 You can manage the user's integrations and API keys directly:
-- list_integrations: enumerate the integrations Loop knows about (Google Calendar via EventKit, Notion, Gmail, Slack, Apple Health) and their current connection state. Notion and Slack are token-backed (ntn_… integration token and xoxp- user token respectively, both stored in the Keychain) — status flips to "connected" once the user pastes the relevant key. Apple Health is OS-permission-backed (like Calendar).
+- list_integrations: enumerate the integrations Loop knows about (Google Calendar via EventKit, Notion, Gmail, Slack, Google Workspace, Apple Health) and their current connection state. Notion, Slack, and Google Workspace are token-backed (ntn_… integration token, xoxp- user token, and OAuth2 access token respectively, all stored in the Keychain) — status flips to "connected" once the user pastes the relevant key. Apple Health is OS-permission-backed (like Calendar).
 - connect_integration: kick off the connect flow for a named integration. For Google Calendar this triggers the OS permission prompt when status is undetermined; if access was previously denied, the tool returns a hint telling you to call open_integration_settings with target="calendar_privacy". For Slack, this returns a `needs_api_key` payload with instructions to walk the user through minting an xoxp- token and pasting it in Settings → Keys → Slack User Token.
 - open_integration_settings: surfaces the in-app Integrations panel (target="in_app", default) or the system Privacy pane (target="calendar_privacy"). Use this when the user says "open integrations" / "let me see my settings".
 - list_api_keys: reports which API keys are currently set (Deepgram, ElevenLabs, OpenAI, Exa, Cursor, Obsidian). Values are never returned — only whether each is present.
@@ -507,6 +507,13 @@ Tips:
         case .xAccessToken:           return "x_access_token"
         case .xAccessTokenSecret:     return "x_access_token_secret"
         case .sfBayTransit:           return "sf_bay_transit"
+        case .googleWorkspaceAccessToken:  return "google_workspace_access_token"
+        case .googleWorkspaceRefreshToken: return "google_workspace_refresh_token"
+        case .googleWorkspaceClientId:     return "google_workspace_client_id"
+        case .googleWorkspaceClientSecret: return "google_workspace_client_secret"
+        case .agentMail:                   return "agentmail"
+        case .agentMailInbox:              return "agentmail_inbox"
+        case .serpAPI:                     return "serpapi"
         }
     }
 

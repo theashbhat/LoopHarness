@@ -65,6 +65,13 @@ final class MusicController {
     private(set) var nowPlaying: NowPlaying?
     private(set) var pauseReason: PauseReason?
 
+    /// Opaque token set when music is ducked for a voice session. Cleared
+    /// when the user explicitly stops music or changes the queue via system
+    /// controls, so an orphaned auto-resume never fires after the user has
+    /// moved on. A new `play_music` call replaces the token (the new track
+    /// becomes the resume target).
+    private(set) var resumeToken: UUID?
+
     // MARK: - Internals
 
     private let player = ApplicationMusicPlayer.shared
@@ -75,6 +82,11 @@ final class MusicController {
 
     /// Min messages before we consider an auto-swap from vocal → instrumental.
     private let instrumentalThreshold = 10
+
+    /// Songs tracked for queue-rebuild. On iOS 26+ the native
+    /// Queue.insert(_:position:) is unreliable mid-playback, so we keep
+    /// our own list and reconstruct the player queue on append.
+    private var managedSongQueue: [Song] = []
 
     private init() {
         subscribeToSignals()
@@ -198,46 +210,81 @@ final class MusicController {
         switch targetType.lowercased() {
         case "song":
             let id = MusicItemID(targetId)
-            var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: id)
-            req.limit = 1
-            guard let song = try await req.response().items.first else {
-                return notFoundResult
-            }
-            if queueMode == "append" {
-                try await player.queue.insert(song, position: .tail)
+            let song: Song?
+            if targetId.hasPrefix("i.") {
+                var req = MusicLibraryRequest<Song>()
+                req.filter(matching: \.id, equalTo: id)
+                song = try await req.response().items.first
             } else {
+                var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: id)
+                req.limit = 1
+                song = try await req.response().items.first
+            }
+            guard let song else { return notFoundResult }
+            if queueMode == "append" {
+                try await appendSongToQueue(song)
+            } else {
+                managedSongQueue = [song]
                 player.queue = .init(for: [song])
             }
-            captureNowPlaying(title: song.title,
-                              artist: song.artistName,
-                              album: song.albumTitle,
-                              selectedBy: selectedBy)
+            if queueMode != "append" {
+                captureNowPlaying(title: song.title,
+                                  artist: song.artistName,
+                                  album: song.albumTitle,
+                                  selectedBy: selectedBy)
+            }
 
         case "album":
             let id = MusicItemID(targetId)
-            var req = MusicCatalogResourceRequest<Album>(matching: \.id, equalTo: id)
-            req.limit = 1
-            guard let album = try await req.response().items.first else {
-                return notFoundResult
+            let album: Album?
+            if targetId.hasPrefix("l.") {
+                var req = MusicLibraryRequest<Album>()
+                req.filter(matching: \.id, equalTo: id)
+                album = try await req.response().items.first
+            } else {
+                var req = MusicCatalogResourceRequest<Album>(matching: \.id, equalTo: id)
+                req.limit = 1
+                album = try await req.response().items.first
             }
-            player.queue = .init(for: [album])
-            captureNowPlaying(title: album.title,
-                              artist: album.artistName,
-                              album: album.title,
-                              selectedBy: selectedBy)
+            guard let album else { return notFoundResult }
+            if queueMode == "append" {
+                try await player.queue.insert(album, position: .tail)
+            } else {
+                managedSongQueue = []
+                player.queue = .init(for: [album])
+            }
+            if queueMode != "append" {
+                captureNowPlaying(title: album.title,
+                                  artist: album.artistName,
+                                  album: album.title,
+                                  selectedBy: selectedBy)
+            }
 
         case "playlist":
             let id = MusicItemID(targetId)
-            var req = MusicCatalogResourceRequest<Playlist>(matching: \.id, equalTo: id)
-            req.limit = 1
-            guard let playlist = try await req.response().items.first else {
-                return notFoundResult
+            let playlist: Playlist?
+            if targetId.hasPrefix("p.") {
+                var req = MusicLibraryRequest<Playlist>()
+                req.filter(matching: \.id, equalTo: id)
+                playlist = try await req.response().items.first
+            } else {
+                var req = MusicCatalogResourceRequest<Playlist>(matching: \.id, equalTo: id)
+                req.limit = 1
+                playlist = try await req.response().items.first
             }
-            player.queue = .init(for: [playlist])
-            captureNowPlaying(title: playlist.name,
-                              artist: playlist.curatorName,
-                              album: nil,
-                              selectedBy: selectedBy)
+            guard let playlist else { return notFoundResult }
+            if queueMode == "append" {
+                try await player.queue.insert(playlist, position: .tail)
+            } else {
+                managedSongQueue = []
+                player.queue = .init(for: [playlist])
+            }
+            if queueMode != "append" {
+                captureNowPlaying(title: playlist.name,
+                                  artist: playlist.curatorName,
+                                  album: nil,
+                                  selectedBy: selectedBy)
+            }
 
         default:
             return ["status": "error",
@@ -245,9 +292,23 @@ final class MusicController {
                     "message": "target_type must be song, album, or playlist."]
         }
 
+        if queueMode == "append" {
+            var out: [String: Any] = ["status": "ok", "action": "appended"]
+            if let np = nowPlaying {
+                out["now_playing"] = [
+                    "title": np.title,
+                    "artist": np.artist ?? "",
+                    "is_instrumental": np.isInstrumental
+                ]
+            }
+            return out
+        }
+
         try await player.prepareToPlay()
         try await player.play()
         pauseReason = nil
+        reduckIfVoiceSessionActive()
+
         AgentActivityLog.shared.log(.status, "playing \(nowPlaying?.title ?? "music")")
 
         var out: [String: Any] = ["status": "ok"]
@@ -259,6 +320,61 @@ final class MusicController {
             ]
         }
         return out
+    }
+
+    // MARK: - Queue append (iOS 26+ workaround)
+
+    /// Append a song without interrupting playback. Tries the native
+    /// `Queue.insert` first; on failure rebuilds the queue from
+    /// `managedSongQueue` and restores the current playback position.
+    private func appendSongToQueue(_ song: Song) async throws {
+        // Fast path: native insert (works pre-iOS 26).
+        do {
+            try await player.queue.insert(song, position: .tail)
+            managedSongQueue.append(song)
+            print("MusicController: appended via native insert")
+            return
+        } catch {
+            print("MusicController: native insert failed (\(error)), rebuilding queue")
+        }
+
+        // Snapshot the queue if we haven't been tracking (e.g. prior play was
+        // an album/playlist). Best-effort — entries that aren't Song-typed
+        // are silently dropped.
+        if managedSongQueue.isEmpty {
+            for entry in player.queue.entries {
+                if case .song(let s) = entry.item { managedSongQueue.append(s) }
+            }
+            print("MusicController: snapshotted \(managedSongQueue.count) songs from queue")
+        }
+
+        let wasPlaying = player.state.playbackStatus == .playing
+        let savedTime = player.playbackTime
+
+        managedSongQueue.append(song)
+
+        // Find the currently-playing song so we rebuild from that point.
+        var currentIdx = 0
+        if let currentEntry = player.queue.currentEntry,
+           case .song(let currentSong) = currentEntry.item {
+            currentIdx = managedSongQueue.firstIndex(where: { $0.id == currentSong.id }) ?? 0
+        }
+
+        let remaining = Array(managedSongQueue.suffix(from: currentIdx))
+        managedSongQueue = remaining
+
+        if wasPlaying { player.pause() }
+
+        player.queue = .init(for: remaining)
+        try await player.prepareToPlay()
+        player.playbackTime = savedTime
+
+        if wasPlaying {
+            try await player.play()
+            pauseReason = nil
+            reduckIfVoiceSessionActive()
+        }
+        print("MusicController: appended via queue rebuild (\(remaining.count) tracks in queue)")
     }
 
     func setMusicMood(rawMood: String, instrumentalOverride: Bool?) async throws -> [String: Any] {
@@ -299,6 +415,7 @@ final class MusicController {
 
         if let song = song {
             print("MusicController: setMusicMood queueing song \"\(song.title)\"")
+            managedSongQueue = [song]
             player.queue = .init(for: [song])
             captureNowPlaying(title: song.title,
                               artist: song.artistName,
@@ -317,6 +434,7 @@ final class MusicController {
                 throw error
             }
             pauseReason = nil
+            reduckIfVoiceSessionActive()
             AgentActivityLog.shared.log(.status, "playing \(song.title)")
             return [
                 "status": "ok",
@@ -331,6 +449,7 @@ final class MusicController {
 
         if let playlist = response.playlists.first {
             print("MusicController: setMusicMood queueing playlist \"\(playlist.name)\"")
+            managedSongQueue = []
             player.queue = .init(for: [playlist])
             captureNowPlaying(title: playlist.name,
                               artist: playlist.curatorName,
@@ -349,6 +468,7 @@ final class MusicController {
                 throw error
             }
             pauseReason = nil
+            reduckIfVoiceSessionActive()
             AgentActivityLog.shared.log(.status, "playing \(playlist.name)")
             return [
                 "status": "ok",
@@ -372,8 +492,69 @@ final class MusicController {
         player.pause()
         pauseReason = reason
         if reason == .userExplicit {
+            resumeToken = nil
             AgentActivityLog.shared.log(.status, "paused music")
         }
+    }
+
+    // MARK: - Voice-session ducking
+
+    /// Synchronously pause music and arm the resume token. Call this
+    /// **before** the earcon plays so the music drops before the cue sounds.
+    /// The notification-based path in `handleVoiceLoopState` still acts as a
+    /// safety net (if the caller forgets, the duck will still happen on the
+    /// next state change), but calling this explicitly avoids the async
+    /// latency of the NotificationCenter round-trip.
+    func duckForVoiceSession() {
+        guard player.state.playbackStatus == .playing else { return }
+        player.pause()
+        pauseReason = .duckRecording
+        resumeToken = UUID()
+        print("MusicController: ducked for voice session (token=\(resumeToken!.uuidString.prefix(8)))")
+    }
+
+    /// Resume music after a voice session if the resume token is still valid
+    /// and we paused for a duck reason. Fails silently on any error so the
+    /// user is never spammed with alerts.
+    func resumeAfterVoiceSession() {
+        guard resumeToken != nil else {
+            print("MusicController: resumeAfterVoiceSession — no resume token, skipping")
+            return
+        }
+        guard pauseReason == .duckRecording || pauseReason == .duckSpeaking else {
+            print("MusicController: resumeAfterVoiceSession — pauseReason is \(String(describing: pauseReason)), skipping")
+            return
+        }
+        Task { [weak self] in
+            do {
+                try await self?.player.play()
+                await MainActor.run {
+                    self?.pauseReason = nil
+                    print("MusicController: resumed after voice session")
+                }
+            } catch {
+                print("MusicController: resumeAfterVoiceSession failed — \(error)")
+                // Fail silently. The track may no longer be in the queue,
+                // Apple Music might have errored, etc.
+            }
+        }
+    }
+
+    /// If the voice loop is in a non-idle state (recording, thinking,
+    /// speaking, …), immediately re-pause the player so a `play()` or
+    /// `setMusicMood()` call made mid-turn doesn't bleed audio. The new
+    /// track stays queued and becomes the resume target when the turn ends.
+    private func reduckIfVoiceSessionActive() {
+        #if os(macOS)
+        let voiceState = VoiceLoopCoordinator.current?.state ?? .idle
+        #else
+        let voiceState = VoiceLoopCoordinator.shared.state
+        #endif
+        guard voiceState != .idle else { return }
+        player.pause()
+        pauseReason = .duckSpeaking
+        resumeToken = UUID()
+        print("MusicController: re-paused for active voice session (state=\(voiceState))")
     }
 
     func resume(reason: PauseReason? = nil) async throws {
@@ -399,7 +580,9 @@ final class MusicController {
     func stop() {
         player.stop()
         pauseReason = .userExplicit
+        resumeToken = nil
         nowPlaying = nil
+        managedSongQueue = []
         AgentActivityLog.shared.log(.status, "stopped music")
     }
 
@@ -413,6 +596,7 @@ final class MusicController {
         if let r = pauseReason {
             out["pause_reason"] = String(describing: r)
         }
+        out["will_auto_resume"] = resumeToken != nil
         if let np = nowPlaying {
             out["now_playing"] = [
                 "title": np.title,
@@ -451,11 +635,26 @@ final class MusicController {
             }
         }
 
-        let playlist = try await MusicLibrary.shared.createPlaylist(
-            name: name,
-            description: description,
-            items: resolved
-        )
+        // Try combined creation first; fall back to two-step for iOS 27+
+        // where the combined response decoder may be out of sync.
+        let playlist: Playlist
+        do {
+            playlist = try await MusicLibrary.shared.createPlaylist(
+                name: name,
+                description: description,
+                items: resolved
+            )
+        } catch {
+            print("MusicController: createPlaylist combined call failed — \(error)")
+            playlist = try await MusicLibrary.shared.createPlaylist(
+                name: name,
+                description: description,
+                items: [] as [Song]
+            )
+            for song in resolved {
+                try await MusicLibrary.shared.add(song, to: playlist)
+            }
+        }
 
         AgentActivityLog.shared.log(.status,
             "created playlist \"\(name)\" with \(resolved.count) tracks")
@@ -514,21 +713,32 @@ final class MusicController {
         switch state {
         case .recording:
             // Pause if currently playing; remember why so we can auto-resume.
+            // The caller may have already called duckForVoiceSession()
+            // synchronously — in that case the player is already paused and
+            // this is a no-op.
             if player.state.playbackStatus == .playing {
-                pause(reason: .duckRecording)
+                player.pause()
+                pauseReason = .duckRecording
+                if resumeToken == nil { resumeToken = UUID() }
             }
         case .speaking:
             if player.state.playbackStatus == .playing {
-                pause(reason: .duckSpeaking)
+                player.pause()
+                pauseReason = .duckSpeaking
+                if resumeToken == nil { resumeToken = UUID() }
             }
-        case .idle, .thinking, .transcribing:
-            // Resume only if we paused for a duck reason. User-explicit
-            // pauses (or interruptions) stay paused until the user/system
-            // says otherwise.
-            if pauseReason == .duckRecording || pauseReason == .duckSpeaking {
-                Task { [weak self] in
-                    try? await self?.resume(reason: self?.pauseReason)
-                }
+        case .thinking, .transcribing:
+            // Mid-voice-flow — the assistant hasn't spoken yet. Keep music
+            // paused so there's no audible gap between recording-end and
+            // TTS-start. Resume is deferred to `.idle`.
+            break
+        case .idle:
+            // The voice turn is fully complete (TTS finished, mic closed).
+            // Resume only if we ducked and the resume token is still valid
+            // (not cleared by a user-explicit stop or track change).
+            if resumeToken != nil,
+               pauseReason == .duckRecording || pauseReason == .duckSpeaking {
+                resumeAfterVoiceSession()
             }
         }
     }

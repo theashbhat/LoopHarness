@@ -59,6 +59,8 @@ final class AnthropicChat {
 
     func chat(messages: [MessageStruct],
               tools: [[String: Any]]? = nil,
+              modelIDOverride: String? = nil,
+              modelStampOverride: String? = nil,
               onPartial: ((String) -> Void)? = nil,
               completion: @escaping (MessageStruct?, Error?) -> Void) {
 
@@ -69,7 +71,11 @@ final class AnthropicChat {
             return
         }
 
-        let modelID = ModelSelectionStore.current.apiModelID ?? "claude-sonnet-4-6"
+        // `modelIDOverride` lets non-agent callers (e.g. VisionSummaryService's
+        // background image-description pass) pin a specific Claude model
+        // regardless of the user's current selection, which may be a non-Claude
+        // provider whose wire id Anthropic would reject.
+        let modelID = modelIDOverride ?? ModelSelectionStore.current.apiModelID ?? "claude-sonnet-4-6"
         let (system, wire) = Self.wirePayload(from: messages)
 
         var body: [String: Any] = [
@@ -137,7 +143,7 @@ final class AnthropicChat {
                 let msg = MessageStruct(
                     role: "assistant",
                     content: r.content,
-                    model: ModelSelectionStore.current.stampedMessageModel,
+                    model: modelStampOverride ?? ModelSelectionStore.current.stampedMessageModel,
                     functions: r.toolCalls,
                     tokenUsage: r.usage,
                     ttft: r.ttft)
@@ -149,6 +155,7 @@ final class AnthropicChat {
 
         let task = streamingSession.dataTask(with: req)
         streamingSessionDelegate.register(task: task, reader: reader)
+        LocalInferenceController.shared.track(task)
         task.resume()
     }
 
@@ -202,9 +209,18 @@ final class AnthropicChat {
         // can trip the orphan-tool_use sanitizer below.
         let filteredMessages = messages.filter { m in
             guard m.role == "assistant" else { return true }
-            if m.id.hasPrefix("image-") || m.id.hasPrefix("pdf-") { return false }
+            if m.id.hasPrefix("image-") || m.id.hasPrefix("pdf-") || m.id.hasPrefix("story-") { return false }
             return true
         }
+
+        // Id of the most recent genuine *human* turn. An image is sent at full
+        // resolution only while its message is this last user turn; on every
+        // later turn we swap the base64 block for a cached text description
+        // (see the image branch below). Tool results are `role:"function"`, so
+        // an in-turn agent loop doesn't advance this — the image stays raw for
+        // the whole turn that introduced it, then downgrades once the human
+        // sends the next message.
+        let lastUserMessageId = filteredMessages.last { $0.role == "user" }?.id
 
         for m in filteredMessages {
             if m.role == "system" {
@@ -272,9 +288,20 @@ final class AnthropicChat {
             let role = (m.role == "assistant") ? "assistant" : "user"
             if let f = m.fileAttachment, f.status == .ready, f.kind == .image,
                let imageBlock = imageBlock(for: f) {
-                let text = m.content.isEmpty ? f.assistantHint
-                                             : "\(m.content)\n\n\(f.assistantHint)"
-                seq.append((role, [textBlock(text), imageBlock]))
+                // Downgrade the image to its cached description on every turn
+                // after the one that introduced it — unless no summary exists
+                // yet, in which case we re-send the raw image so the model
+                // never loses sight of it (correctness over token savings).
+                let isIntroducingTurn = (m.id == lastUserMessageId)
+                if !isIntroducingTurn, let summaryHint = f.imageSummaryHint {
+                    let text = m.content.isEmpty ? summaryHint
+                                                 : "\(m.content)\n\n\(summaryHint)"
+                    seq.append((role, [textBlock(text)]))
+                } else {
+                    let text = m.content.isEmpty ? f.assistantHint
+                                                 : "\(m.content)\n\n\(f.assistantHint)"
+                    seq.append((role, [textBlock(text), imageBlock]))
+                }
             } else {
                 var content = m.content
                 if let f = m.fileAttachment, f.status == .ready {
@@ -421,6 +448,13 @@ final class AnthropicChat {
     /// annotations on top.
     static func testableAnthropicTools(from tools: [[String: Any]]) -> [[String: Any]] {
         anthropicTools(from: tools)
+    }
+
+    /// Expose `wirePayload(from:)` for unit tests so the image-downgrade logic
+    /// (raw image on the introducing turn, cached description afterwards) can
+    /// be asserted without a network call.
+    static func testableWirePayload(from messages: [MessageStruct]) -> (String?, [[String: Any]]) {
+        wirePayload(from: messages)
     }
 
     // MARK: - Errors
