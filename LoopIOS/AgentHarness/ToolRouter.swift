@@ -91,6 +91,7 @@ struct ToolRouter {
             "website", "browse", "fetch",
         ], toolNames: [
             "exa_search", "exa_get_contents", "exa_list_websets", "fetch_url",
+            "image_search",
         ]),
         SkillGroup(name: "health", keywords: [
             "health", "steps", "workout", "heart rate", "sleep",
@@ -115,8 +116,14 @@ struct ToolRouter {
         ]),
         SkillGroup(name: "image", keywords: [
             "image", "picture", "photo", "generate image", "draw",
-            "illustration", "dalle", "dall-e",
+            "illustration", "dalle", "dall-e", "find image", "find me image",
+            "show me", "real photo", "pics", "pictures of", "photos of",
         ], toolNames: [
+            // Both the web image search and the AI generator are surfaced for
+            // any image-ish request. The system prompt steers the model to
+            // prefer image_search for real/existing subjects (cheap) and only
+            // use generate_image for invented art (expensive).
+            "image_search",
             "generate_image",
         ]),
         SkillGroup(name: "pdf", keywords: [
@@ -168,6 +175,12 @@ struct ToolRouter {
             "inbox", "gmail", "agentmail", "send me",
         ], toolNames: [
             "agent_mail", "google_gmail",
+        ]),
+        SkillGroup(name: "card", keywords: [
+            "card", "feed", "generate a card", "summary card",
+            "recap", "visual card", "poster",
+        ], toolNames: [
+            "generate_card",
         ]),
     ]
 

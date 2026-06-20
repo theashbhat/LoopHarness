@@ -76,6 +76,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				AppIntents/AskLoopIntent.swift,
+				AppIntents/CaptureToLoopIntent.swift,
 				Assets.xcassets,
 				HelperViews/AvatarView.swift,
 				HelperViews/ShimmerLabel.swift,
@@ -83,6 +85,7 @@
 				Info.plist,
 				LifeView/LifeView.swift,
 				MainVC.swift,
+				Markdown/MarkdownShareToolbar.swift,
 				MarkdownEditorViewController.swift,
 				MessageBox.swift,
 				MessagingCell.swift,
@@ -125,12 +128,15 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AppDelegate.swift,
+				AppIntents/AskLoopIntent.swift,
+				AppIntents/CaptureToLoopIntent.swift,
 				HelperViews/AvatarView.swift,
 				HelperViews/ShimmerLabel.swift,
 				ImageViewerVC.swift,
 				Info.plist,
 				LifeView/LifeView.swift,
 				MainVC.swift,
+				Markdown/MarkdownShareToolbar.swift,
 				MarkdownEditorViewController.swift,
 				MessageBox.swift,
 				MessagingCell.swift,

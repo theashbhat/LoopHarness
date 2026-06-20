@@ -65,17 +65,22 @@ final class EarconPlayer {
         if !player.isPlaying { player.play() }
     }
 
-    /// Schedule the earcon and block the current runloop until the audio
-    /// has had a chance to finish. Used for `.goodbye` at app quit, where
-    /// we need the sound to actually play before the process exits.
-    func playBlocking(_ name: Name, timeout: TimeInterval = 0.5) {
-        guard enabled, let buf = buffers[name] else { return }
+    /// Schedule the earcon and invoke `completion` once the buffer finishes
+    /// playing (or immediately if it can't). Used for `.goodbye` at app quit:
+    /// the caller defers termination until the sound completes instead of
+    /// blocking the main thread on a cross-QoS semaphore — the latter trips
+    /// the Thread Performance Checker's "hang risk" priority-inversion warning
+    /// because the main (user-interactive) thread would wait on AVAudioEngine's
+    /// lower-QoS render thread.
+    ///
+    /// `completion` fires on an AVAudioEngine internal thread — hop to your
+    /// queue of choice inside it.
+    func play(_ name: Name, completion: @escaping () -> Void) {
+        guard enabled, let buf = buffers[name] else { completion(); return }
         if !engine.isRunning { startEngine() }
-        guard engine.isRunning else { return }
-        let semaphore = DispatchSemaphore(value: 0)
-        player.scheduleBuffer(buf) { semaphore.signal() }
+        guard engine.isRunning else { completion(); return }
+        player.scheduleBuffer(buf) { completion() }
         if !player.isPlaying { player.play() }
-        _ = semaphore.wait(timeout: .now() + timeout)
     }
 
     private func startEngine() {

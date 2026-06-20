@@ -179,7 +179,15 @@ final class MacSpeechPlayer {
         audioPlayer?.stop()
         audioPlayer = nil
         meteringTimer?.invalidate(); meteringTimer = nil
-        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+        // `stopSpeaking(at:)` synchronously blocks on AVSpeechSynthesizer's
+        // internal Default-QoS speech-service thread. Calling it from the main
+        // (user-interactive) thread is a priority inversion that trips the
+        // Thread Performance Checker's "hang risk" warning, so hop to a
+        // matching Default-QoS queue — stop() is fire-and-forget (callers
+        // observe onFinished), and stopping when idle is harmless.
+        DispatchQueue.global(qos: .default).async { [synthesizer] in
+            if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+        }
         // Drop the avatar's speaking amplitude to 0 so its EMA decays back
         // to the canned/idle behavior promptly.
         DispatchQueue.main.async { [weak self] in self?.onOutputAmplitude?(0) }

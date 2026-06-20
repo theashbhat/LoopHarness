@@ -513,6 +513,7 @@ Tips:
         case .googleWorkspaceClientSecret: return "google_workspace_client_secret"
         case .agentMail:                   return "agentmail"
         case .agentMailInbox:              return "agentmail_inbox"
+        case .serpAPI:                     return "serpapi"
         }
     }
 

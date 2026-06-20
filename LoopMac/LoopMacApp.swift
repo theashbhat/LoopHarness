@@ -270,11 +270,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        // Mirror the welcome cue in reverse (E5 → A4) at shutdown. `playBlocking`
-        // pumps the runloop until the buffer finishes (or a 0.5s timeout)
-        // so the process doesn't exit before the sound completes.
-        EarconPlayer.shared.playBlocking(.goodbye)
+    private var isTerminating = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Mirror the welcome cue in reverse (E5 → A4) at shutdown. Rather than
+        // block the main thread on a semaphore (which would wait on
+        // AVAudioEngine's lower-QoS render thread and trip the Thread
+        // Performance Checker's hang-risk warning), defer termination until the
+        // buffer finishes, with a safety timeout so we always quit.
+        if isTerminating { return .terminateNow }
+        isTerminating = true
+
+        var replied = false
+        let reply = {
+            guard !replied else { return }
+            replied = true
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+
+        EarconPlayer.shared.play(.goodbye) {
+            DispatchQueue.main.async { reply() }
+        }
+        // Guard against the completion never firing (engine stopped, etc.).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { reply() }
+
+        return .terminateLater
     }
 
     @objc private func remoteConversationChanged() {

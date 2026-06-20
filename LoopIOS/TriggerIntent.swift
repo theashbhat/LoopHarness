@@ -49,5 +49,54 @@ struct LoopAppShortcuts: AppShortcutsProvider {
             shortTitle: "Start Dictation",
             systemImageName: "mic.fill"
         )
+
+        // iOS 27+ App Intents — guarded at the shortcut level so the
+        // provider compiles on older SDKs but the entries only appear
+        // when running on iOS 27.
+        if #available(iOS 27.0, *) {
+            AppShortcut(
+                intent: AskLoopIntent(),
+                phrases: [
+                    "Ask \(.applicationName)",
+                    "Hey \(.applicationName)",
+                    "Tell \(.applicationName)"
+                ],
+                shortTitle: "Ask Loop",
+                systemImageName: "bubble.left.fill"
+            )
+
+            AppShortcut(
+                intent: CaptureToLoopIntent(),
+                phrases: [
+                    "Send this to \(.applicationName)",
+                    "Capture this with \(.applicationName)",
+                    "Share screen with \(.applicationName)"
+                ],
+                shortTitle: "Send to Loop",
+                systemImageName: "camera.viewfinder"
+            )
+
+            AppShortcut(
+                intent: LoopRememberIntent(),
+                phrases: [
+                    "Remember with \(.applicationName)",
+                    "\(.applicationName) remember this",
+                    "Note in \(.applicationName)"
+                ],
+                shortTitle: "Remember with Loop",
+                systemImageName: "note.text"
+            )
+
+            AppShortcut(
+                intent: SearchLoopIntent(),
+                phrases: [
+                    "Search \(.applicationName)",
+                    "Find in \(.applicationName)",
+                    "Search with \(.applicationName)"
+                ],
+                shortTitle: "Search Loop",
+                systemImageName: "magnifyingglass"
+            )
+        }
     }
 }

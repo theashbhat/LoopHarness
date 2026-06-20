@@ -65,10 +65,13 @@ final class SettingsVC: UIViewController {
         return AppFlags.isManaged ? hidingManagedRows(sections) : sections
     }
 
-    /// Managed builds pin the backend and lock down model/skills/SSH, so drop
-    /// those rows (and any section left empty — e.g. "Core") from Settings.
+    /// Managed builds pin the backend and lock down skills/SSH, so drop those
+    /// rows (and any section left empty — e.g. "Core") from Settings. Model
+    /// switching stays available: it routes to the same ModelPickerVC, which
+    /// gates picks on a configured key, so a managed user can still move
+    /// between the models their build can actually run.
     private func hidingManagedRows(_ sections: [Section]) -> [Section] {
-        let hidden: Set<String> = ["Execution Backend", "Model", "Skills", "SSH"]
+        let hidden: Set<String> = ["Execution Backend", "Skills", "SSH"]
         return sections.compactMap { section in
             let rows = section.rows.filter { !hidden.contains($0.title) }
             return rows.isEmpty ? nil : Section(header: section.header, rows: rows)

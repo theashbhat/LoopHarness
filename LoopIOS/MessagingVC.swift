@@ -386,6 +386,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             // with a fileAttachment; image / map skills do the same.
             if $0.imageAttachment != nil { return true }
             if $0.mapAttachment != nil { return true }
+            if $0.imageGalleryAttachment != nil { return true }
             if $0.fileAttachment != nil { return true }
             // Assistant turns carrying tool calls are now surfaced as a
             // collapsible "Used N tools" disclosure, so they're kept (they
@@ -408,6 +409,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
                 && !m.functions.isEmpty
                 && m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && m.imageAttachment == nil && m.mapAttachment == nil && m.fileAttachment == nil
+                && m.imageGalleryAttachment == nil
         }
         var out: [MessageStruct] = []
         for message in messages {
@@ -592,6 +594,15 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             object: nil
         )
 
+        // iOS 27 App Intents inject user messages via notification so the
+        // intent doesn't depend on finding MessagingVC in the responder chain.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleIntentMessage(_:)),
+            name: .loopIntentMessageReceived,
+            object: nil
+        )
+
         // Settings ▸ Model writes to TTSProviderStore from outside our setter.
         // Rebuild the speaker menu so the checkmark + voice submenu reflect
         // the new pick without waiting for the user to reopen this VC.
@@ -654,6 +665,17 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             object: nil
         )
 
+        // When iCloud sync (or pass-2 hydration) updates the store, re-read
+        // the current conversation's messages so the UI self-heals after a
+        // cold restart or cross-device push. Guarded inside the handler to
+        // avoid clobbering an in-flight agent turn.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleConversationStoreDidChange),
+            name: .conversationStoreDidChange,
+            object: nil
+        )
+
         // Cover writers that go through iCloudKVSDefaults directly (e.g. the
         // OnboardingCoordinator's voice-step writes to `audioMuted` and
         // `ttsProvider`) — without this, picking a voice during onboarding
@@ -663,6 +685,14 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             self,
             selector: #selector(handleKVSDefaultsChanged(_:)),
             name: iCloudKVSDefaults.didChangeNotification,
+            object: nil
+        )
+
+        // Card feed: show a pill alert whenever a new card is generated.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleCardAdded(_:)),
+            name: CardStore.cardAddedNotification,
             object: nil
         )
 
@@ -809,6 +839,10 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         if let conversation = conversationManager.loadLastConversation() {
             print("🚀 Found last conversation: \(conversation.title)")
             currentConversationEntity = conversation
+            // Tell the store to hydrate this conversation first so the user
+            // doesn't stare at a blank screen while 50 other conversations
+            // get parsed ahead of the one they're looking at.
+            ConversationFileStore.shared.prioritizeHydration(id: conversation.id)
             loadMessagesFromConversation(conversation)
         } else {
             print("🚀 No last conversation found, starting with default message")
@@ -823,7 +857,27 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         
         let messageEntities = conversationManager.getMessages(for: conversation)
         print("🔄 Retrieved \(messageEntities.count) messages from storage")
-        
+
+        // Defensive: if the store returned zero messages but the conversation
+        // has a recent updatedAt (implying content exists on disk that hasn't
+        // been hydrated yet), skip the clear-and-reload to avoid flashing a
+        // blank screen. The store will post .conversationStoreDidChange once
+        // hydration finishes, and handleConversationStoreDidChange will retry.
+        if messageEntities.isEmpty && !conversation.messages.isEmpty {
+            print("⚠️ Store returned 0 messages but conversation metadata suggests content exists — deferring render until hydration completes")
+            return
+        }
+        if messageEntities.isEmpty && conversation.updatedAt.timeIntervalSinceNow > -86400 * 365 {
+            // Even if conversation.messages is empty (meta-only stub), a
+            // conversation updated within the last year likely has content.
+            // If the store isn't hydrated yet, request hydration and bail.
+            if !ConversationFileStore.shared.isHydrated(id: conversation.id) {
+                print("⚠️ Conversation not yet hydrated — requesting async hydration")
+                ConversationFileStore.shared.requestHydrationIfNeeded(id: conversation.id)
+                return
+            }
+        }
+
         // Clear existing messages except system message
         messages = [messages[0]] // Keep system message
         
@@ -842,6 +896,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             self.scrollToLastMessage()
             self.messagesDidReload()
         }
+        messagesDidReload()
 
         // For a VM-backed conversation, the assistant turn is written remotely
         // by the daemon, so the local cache can lag what's on the VM (e.g. a
@@ -1024,6 +1079,18 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         }
     }
 
+    /// Handles a user message injected by an iOS 27 App Intent (AskLoop,
+    /// CaptureToLoop, SearchLoop). The notification carries a `"message"`
+    /// string in `userInfo` which gets piped through the same path as a
+    /// typed message.
+    @objc private func handleIntentMessage(_ notification: Notification) {
+        guard let text = notification.userInfo?["message"] as? String,
+              !text.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.didSendMessageText(text)
+        }
+    }
+
     /// Posted by TTSProviderStore when Settings ▸ Model picks a new provider.
     /// We rebuild the speaker menu directly rather than rerouting through the
     /// `ttsProvider` setter (which would also re-post the same notification
@@ -1167,6 +1234,42 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     
     func newMessageSent() {
 
+    }
+
+    /// Called after `loadMessagesFromConversation` finishes populating
+    /// `self.messages` and reloading the table. Subclasses (MainVC) override
+    /// to refresh orb visibility so the hero/nav-bar handoff stays correct
+    /// on every message-load path — not just `loadConversation` and
+    /// `newMessageSent`.
+    // MARK: - Store change observation
+
+    /// Re-read the current conversation from the store when iCloud sync or
+    /// pass-2 hydration updates it. Skips the reload when an agent turn is
+    /// in flight (streaming partial or thinking) to avoid clobbering live
+    /// state that hasn't been flushed to disk yet.
+    @objc private func handleConversationStoreDidChange() {
+        guard let current = currentConversationEntity else { return }
+
+        // Don't clobber an in-flight agent turn whose data lives only in
+        // memory (streamingPartial, ai_state). The store will eventually
+        // have it once the turn completes; we'll pick it up on the next
+        // notification.
+        if ai_state != .None || !streamingPartial.isEmpty { return }
+
+        let freshMessages = conversationManager.getMessages(for: current)
+        let currentCount = messages.count - 1 // minus system message
+
+        // Only reload if the store has *more* content than what's on screen.
+        // This avoids pointless reloads for unrelated conversations and
+        // prevents replacing a populated screen with fewer messages during
+        // a transient cache state.
+        guard freshMessages.count > currentCount else { return }
+
+        // Re-read the conversation entity so our snapshot is current.
+        if let fresh = conversationManager.getConversation(by: current.id) {
+            currentConversationEntity = fresh
+            loadMessagesFromConversation(fresh, refreshIfRemote: false)
+        }
     }
 
 
@@ -1430,6 +1533,19 @@ extension MessagingVC: MessageBoxDelegate {
             messages: self.chatContextMessages,
             conversationId: requestConversationId
         )
+
+        // Reset the anti-loop guard so prior tool-call patterns don't
+        // bleed into the new user turn.
+        ToolCallGuard.shared.resetForNewTurn()
+
+        // Kick off background descriptions for any image attachment in this
+        // conversation that doesn't have one yet. Generating now — at send
+        // time — means the description is usually ready by the user's next
+        // turn, at which point the chat clients stop re-sending the raw image
+        // and inline the text instead. Idempotent (guarded per attachment id),
+        // so re-running every turn is fine. Remote (OpenClaw) conversations
+        // already reference images by workspace path and returned above.
+        VisionSummaryService.shared.ensureSummaries(for: self.messages, conversationId: requestConversationId)
 
         let initialContext = self.chatContextMessages
         self.beginStreamingTurn()
@@ -3608,9 +3724,18 @@ extension MessagingVC: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // The reveal pan accepts touches anywhere on the transcript; only the
-        // side-drawer edge pan is restricted to the left edge.
-        if gestureRecognizer == timeRevealPan { return true }
+        // The reveal pan accepts touches anywhere on the transcript, EXCEPT
+        // inside an image-search gallery — a horizontal swipe there should
+        // scroll the thumbnails, not drag the whole transcript to reveal
+        // timestamps.
+        if gestureRecognizer == timeRevealPan {
+            var v: UIView? = touch.view
+            while let cur = v {
+                if cur is ImageGalleryScrollView { return false }
+                v = cur.superview
+            }
+            return true
+        }
         // Only respond to touches that start near the left edge and when side drawer is not open
         let location = touch.location(in: view)
         return location.x <= 20 && sideDrawer == nil
@@ -5022,6 +5147,21 @@ extension MessagingVC: ActionButtonReminderBarDelegate {
 
     func actionButtonReminderBarDismissed() {
         // The bar refreshes itself on dismiss tap; nothing extra to do here.
+    }
+
+    // MARK: - Card Feed Pill Alert
+
+    @objc private func handleCardAdded(_ notification: Notification) {
+        guard let card = notification.object as? Card else { return }
+        CardPillAlert.show(in: self, cardId: card.id) { [weak self] cardId in
+            // Tapping the pill opens the card's detail view. There is no Feed
+            // tab — cards otherwise surface on the new-chat swipe stack.
+            guard let self = self else { return }
+            let latest = CardStore.shared.card(for: cardId) ?? card
+            let detail = CardDetailViewController(card: latest)
+            let nav = UINavigationController(rootViewController: detail)
+            self.present(nav, animated: true)
+        }
     }
 }
 

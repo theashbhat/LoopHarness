@@ -95,6 +95,11 @@ final class ConversationFileStore: ConversationStore {
     private var inflightHydrations: Set<String> = []
     /// True while the metadata-query-triggered refresh is running.
     private var inflightRefresh: Bool = false
+    /// Ids whose files were missing from disk on the most recent
+    /// `surgicalRefresh`. Eviction is deferred: an id is only evicted if
+    /// it's still missing on the *next* refresh — this prevents transient
+    /// iCloud download/rename operations from evicting the active convo.
+    private var pendingEvictions: Set<String> = []
     /// Flips true once `bootstrap()` has resolved the container and finished
     /// pass-1 enumeration. Reads return an empty cache until then; UI observes
     /// `.conversationStoreDidBecomeReady` to load the real last conversation.
@@ -217,6 +222,22 @@ final class ConversationFileStore: ConversationStore {
         cacheLock.unlock()
         if exists && !hydrated { hydrateAsync(id: id) }
         return msgs
+    }
+
+    /// Whether a conversation's messages have been fully parsed from disk.
+    /// MessagingVC uses this to avoid rendering a blank screen when the store
+    /// has only meta-stub data for the conversation.
+    func isHydrated(id: String) -> Bool {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return hydratedIds.contains(id)
+    }
+
+    /// Kick off an async hydration for `id` if it hasn't been hydrated yet.
+    /// Public entry point for callers that detect a not-yet-hydrated row and
+    /// want the store to prioritize it (e.g. the active conversation on
+    /// cold start). The store posts `.conversationStoreDidChange` when done.
+    func requestHydrationIfNeeded(id: String) {
+        hydrateAsync(id: id)
     }
 
     /// True while the initial bootstrap, pass-2 hydration, or a metadata-driven
@@ -478,12 +499,32 @@ final class ConversationFileStore: ConversationStore {
     // needed) and replace the cache entry's messages. Posts a coalesced
     // change notification when the batch settles.
 
+    /// Id to hydrate first in pass-2. Set by the UI layer (via
+    /// `prioritizeHydration(id:)`) before pass-2 runs so the conversation
+    /// the user is looking at doesn't wait behind 50 others.
+    private var prioritizedHydrationId: String?
+
+    /// Ask pass-2 to hydrate this conversation first. Safe to call from any
+    /// thread; the value is read once at the start of `scheduleFullHydration`.
+    func prioritizeHydration(id: String) {
+        cacheLock.lock()
+        prioritizedHydrationId = id
+        cacheLock.unlock()
+    }
+
     private func scheduleFullHydration() {
         ioQueue.async { [weak self] in
             guard let self = self else { return }
             // Snapshot ids to hydrate from current cache.
             self.cacheLock.lock()
-            let ids = self.orderedIds
+            var ids = self.orderedIds
+            // Move the prioritized id to the front so the active conversation
+            // hydrates before everything else.
+            if let prio = self.prioritizedHydrationId,
+               let idx = ids.firstIndex(of: prio), idx != 0 {
+                ids.remove(at: idx)
+                ids.insert(prio, at: 0)
+            }
             for id in ids where !self.hydratedIds.contains(id) {
                 self.inflightHydrations.insert(id)
             }
@@ -682,14 +723,22 @@ final class ConversationFileStore: ConversationStore {
 
         // Evict cache entries whose files disappeared, except those with
         // pending writes (the disk write probably hasn't landed yet).
+        // Use a "marked for eviction" set: don't evict on the first miss
+        // — only evict if the file was also missing on the previous refresh.
+        // This prevents transient iCloud download/rename operations from
+        // evicting the active conversation mid-sync.
         cacheLock.lock()
         let cachedIds = Set(cache.keys)
-        let evictable = cachedIds.subtracting(onDiskIds).subtracting(pendingWrites)
-        for id in evictable {
+        let missingIds = cachedIds.subtracting(onDiskIds).subtracting(pendingWrites)
+        let confirmedEvictions = missingIds.intersection(pendingEvictions)
+        for id in confirmedEvictions {
             cache.removeValue(forKey: id)
             hydratedIds.remove(id)
             anyChange = true
         }
+        // IDs missing for the first time are staged; they'll be evicted on
+        // the next refresh if they're still gone.
+        pendingEvictions = missingIds.subtracting(confirmedEvictions)
         if anyChange { recomputeOrderedIdsLocked() }
         cacheLock.unlock()
 

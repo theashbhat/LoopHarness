@@ -24,6 +24,16 @@ class MainVC: MessagingVC {
     /// later calls run the pop when this flips.
     private var lastVisibilityEmpty: Bool?
 
+    /// Scannable card list shown on the empty new-chat screen. Replaces the
+    /// hero orb whenever there are unarchived feed cards; the orb steps back to
+    /// the nav bar. There is no Feed tab — this is where cards live.
+    private var feedCardList: FeedCardListView?
+
+    /// True once the current empty-state list has been populated. Reset when
+    /// the chat becomes non-empty so the next new chat reloads a fresh list
+    /// rather than reloading on every layout pass.
+    private var feedStackLoaded = false
+
     /// The immersive agent view when it is hosted as a child view
     /// controller (instead of a fullscreen modal). Kept alive so dismiss
     /// can tear it down cleanly.
@@ -34,8 +44,34 @@ class MainVC: MessagingVC {
 
         setupAvatarTitleView()
         setupHeroAvatar()
+        setupFeedCardStack()
 
         wireAvatarToVoiceLoop()
+
+        // A card generated on a heartbeat / while sitting on a blank chat
+        // should slide a fresh deck in under the orb. Re-shuffle and refresh.
+        NotificationCenter.default.addObserver(
+            forName: CardStore.cardAddedNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.visible_messages.isEmpty else { return }
+            self.feedStackLoaded = false
+            self.refreshAvatarVisibility(animated: true)
+        }
+
+        // An edit (or archive) to a card while we're sitting on a blank chat
+        // should refresh the visible list. Deferred so it never reloads the
+        // table mid-swipe — the swipe handler removes its own row first, and
+        // this reconciles afterward against the latest store contents.
+        NotificationCenter.default.addObserver(
+            forName: CardStore.cardUpdatedNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.visible_messages.isEmpty else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                guard self.visible_messages.isEmpty else { return }
+                self.feedStackLoaded = false
+                self.refreshAvatarVisibility(animated: false)
+            }
+        }
 
         // Hero owns the empty state, nav-bar avatar owns the conversation
         // state. Exactly one is shown at a time, driven by whether there's
@@ -223,6 +259,42 @@ class MainVC: MessagingVC {
         self.heroAvatar = big
     }
 
+    /// Builds the card list and fills the empty-state area above the input bar,
+    /// so it reads as the primary empty-state element when cards exist. Hidden
+    /// until `refreshAvatarVisibility` decides there's a list to show.
+    private func setupFeedCardStack() {
+        let list = FeedCardListView()
+        list.translatesAutoresizingMaskIntoConstraints = false
+        list.isHidden = true
+        // Below the message box for the same reason as the hero — never cover
+        // the input bar.
+        view.insertSubview(list, belowSubview: messageBox)
+
+        NSLayoutConstraint.activate([
+            list.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            list.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            list.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            list.bottomAnchor.constraint(equalTo: messageBox.topAnchor, constant: -8),
+        ])
+
+        list.onTap = { [weak self] card in
+            guard let self = self else { return }
+            let latest = CardStore.shared.card(for: card.id) ?? card
+            let detail = CardDetailViewController(card: latest)
+            let nav = UINavigationController(rootViewController: detail)
+            self.present(nav, animated: true)
+        }
+        list.onArchive = { card in
+            CardStore.shared.updateState(id: card.id, state: .archived)
+        }
+        list.onEmptied = { [weak self] in
+            // Last card cleared — bring the orb back.
+            self?.refreshAvatarVisibility(animated: true)
+        }
+
+        self.feedCardList = list
+    }
+
     /// Subscribes both avatars to the shared VoiceLoopCoordinator. Same
     /// state→mode mapping the Mac uses on its conversation window.
     private func wireAvatarToVoiceLoop() {
@@ -365,13 +437,32 @@ class MainVC: MessagingVC {
     /// the two slots. Initial visibility, Reduce Motion, and non-animated
     /// callers take the plain alpha-fade path.
     private func refreshAvatarVisibility(animated: Bool = true) {
-        let isEmpty = self.visible_messages.isEmpty
+        let chatEmpty = self.visible_messages.isEmpty
+
+        // Load (or reshuffle) the swipe deck the first time we land on a blank
+        // chat. Reset the flag when the chat fills so the next new chat deals a
+        // fresh deck — and so we never reload mid-swipe on a layout pass.
+        if chatEmpty {
+            if !feedStackLoaded {
+                feedCardList?.setCards(CardStore.shared.feedCards)
+                feedStackLoaded = true
+            }
+        } else {
+            feedStackLoaded = false
+        }
+
+        // The list owns the empty state when it has cards; otherwise the orb
+        // does. `heroShown` is the orb's truth — note it's false while the
+        // list is up, which is what relegates the orb to the nav bar.
+        let stackHasCards = chatEmpty && !(feedCardList?.isEmpty ?? true)
+        let heroShown = chatEmpty && !stackHasCards
+        feedCardList?.isHidden = !stackHasCards
+
         let previous = lastVisibilityEmpty
-
         let isInitial = (previous == nil)
-        let changed = previous != isEmpty
+        let changed = previous != heroShown
 
-        // Idempotent: bail out when the empty/non-empty state hasn't moved.
+        // Idempotent: bail out when the hero's shown/hidden state hasn't moved.
         // This makes the method cheap and safe to call on every layout pass
         // (see viewDidLayoutSubviews), which is what guarantees the hero never
         // lingers over a populated chat regardless of which path appended the
@@ -379,7 +470,7 @@ class MainVC: MessagingVC {
         // poll, etc. None of those route through an explicit refresh site.
         guard isInitial || changed else { return }
 
-        lastVisibilityEmpty = isEmpty
+        lastVisibilityEmpty = heroShown
 
         let canPop = animated
             && changed
@@ -388,8 +479,8 @@ class MainVC: MessagingVC {
             && view.window != nil
 
         guard canPop else {
-            setHeroVisible(isEmpty, animated: animated && !isInitial)
-            setNavAvatarVisible(!isEmpty, animated: animated && !isInitial)
+            setHeroVisible(heroShown, animated: animated && !isInitial)
+            setNavAvatarVisible(!heroShown, animated: animated && !isInitial)
             return
         }
 
@@ -409,21 +500,21 @@ class MainVC: MessagingVC {
               let nav = avatar,
               let window = view.window
         else {
-            setHeroVisible(isEmpty, animated: true)
-            setNavAvatarVisible(!isEmpty, animated: true)
+            setHeroVisible(heroShown, animated: true)
+            setNavAvatarVisible(!heroShown, animated: true)
             return
         }
 
-        let source: UIView = isEmpty ? nav : hero
-        let dest: UIView   = isEmpty ? hero : nav
+        let source: UIView = heroShown ? nav : hero
+        let dest: UIView   = heroShown ? hero : nav
 
         AvatarPopAnimator.play(from: source, to: dest, in: window) { [weak self] in
             guard let self = self else { return }
-            // Final visibility: hero shows on empty, nav-bar shows on
-            // non-empty. The animator restored isHidden on both, so we set
-            // the canonical end state here without re-animating.
-            self.setHeroVisible(isEmpty, animated: false)
-            self.setNavAvatarVisible(!isEmpty, animated: false)
+            // Final visibility: hero shows when it owns the empty state,
+            // nav-bar shows otherwise (live chat or stack up). The animator
+            // restored isHidden on both, so set the canonical end state here.
+            self.setHeroVisible(heroShown, animated: false)
+            self.setNavAvatarVisible(!heroShown, animated: false)
         }
     }
 }

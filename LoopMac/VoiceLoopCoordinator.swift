@@ -818,6 +818,9 @@ The current date and time is \(now).
         if ExaSkill.shared.handles(functionName: function.name) {
             ExaSkill.shared.handle(functionCall: function, completion: cont); return
         }
+        if SerpImageSearchSkill.shared.handles(functionName: function.name) {
+            SerpImageSearchSkill.shared.handle(functionCall: function, completion: cont); return
+        }
         if URLFetchSkill.shared.handles(functionName: function.name) {
             URLFetchSkill.shared.handle(functionCall: function, completion: cont); return
         }
@@ -944,6 +947,7 @@ The current date and time is \(now).
 
     private func statusText(for call: FunctionCallStruct) -> String {
         if let s = ExaSkill.shared.statusText(for: call) { return s }
+        if let s = SerpImageSearchSkill.shared.statusText(for: call) { return s }
         if let s = NotionSkill.shared.statusText(for: call) { return s }
         if let s = SlackSkill.shared.statusText(for: call) { return s }
         if let s = SchedulerSkill.shared.statusText(for: call) { return s }
