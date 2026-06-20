@@ -98,8 +98,10 @@ final class MarkdownEditorViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         configureNavigationItem()
-        configureTextView()
+        // Toolbar must be in the view hierarchy before configureTextView()
+        // constrains the text view's bottom to shareToolbar.topAnchor.
         configureShareToolbar()
+        configureTextView()
         configureActivityIndicator()
         observeKeyboard()
         loadFile()
