@@ -83,6 +83,11 @@ final class MusicController {
     /// Min messages before we consider an auto-swap from vocal → instrumental.
     private let instrumentalThreshold = 10
 
+    /// Songs tracked for queue-rebuild. On iOS 26+ the native
+    /// Queue.insert(_:position:) is unreliable mid-playback, so we keep
+    /// our own list and reconstruct the player queue on append.
+    private var managedSongQueue: [Song] = []
+
     private init() {
         subscribeToSignals()
     }
@@ -217,14 +222,17 @@ final class MusicController {
             }
             guard let song else { return notFoundResult }
             if queueMode == "append" {
-                try await player.queue.insert(song, position: .tail)
+                try await appendSongToQueue(song)
             } else {
+                managedSongQueue = [song]
                 player.queue = .init(for: [song])
             }
-            captureNowPlaying(title: song.title,
-                              artist: song.artistName,
-                              album: song.albumTitle,
-                              selectedBy: selectedBy)
+            if queueMode != "append" {
+                captureNowPlaying(title: song.title,
+                                  artist: song.artistName,
+                                  album: song.albumTitle,
+                                  selectedBy: selectedBy)
+            }
 
         case "album":
             let id = MusicItemID(targetId)
@@ -242,12 +250,15 @@ final class MusicController {
             if queueMode == "append" {
                 try await player.queue.insert(album, position: .tail)
             } else {
+                managedSongQueue = []
                 player.queue = .init(for: [album])
             }
-            captureNowPlaying(title: album.title,
-                              artist: album.artistName,
-                              album: album.title,
-                              selectedBy: selectedBy)
+            if queueMode != "append" {
+                captureNowPlaying(title: album.title,
+                                  artist: album.artistName,
+                                  album: album.title,
+                                  selectedBy: selectedBy)
+            }
 
         case "playlist":
             let id = MusicItemID(targetId)
@@ -265,17 +276,32 @@ final class MusicController {
             if queueMode == "append" {
                 try await player.queue.insert(playlist, position: .tail)
             } else {
+                managedSongQueue = []
                 player.queue = .init(for: [playlist])
             }
-            captureNowPlaying(title: playlist.name,
-                              artist: playlist.curatorName,
-                              album: nil,
-                              selectedBy: selectedBy)
+            if queueMode != "append" {
+                captureNowPlaying(title: playlist.name,
+                                  artist: playlist.curatorName,
+                                  album: nil,
+                                  selectedBy: selectedBy)
+            }
 
         default:
             return ["status": "error",
                     "error": "bad_target_type",
                     "message": "target_type must be song, album, or playlist."]
+        }
+
+        if queueMode == "append" {
+            var out: [String: Any] = ["status": "ok", "action": "appended"]
+            if let np = nowPlaying {
+                out["now_playing"] = [
+                    "title": np.title,
+                    "artist": np.artist ?? "",
+                    "is_instrumental": np.isInstrumental
+                ]
+            }
+            return out
         }
 
         try await player.prepareToPlay()
@@ -294,6 +320,61 @@ final class MusicController {
             ]
         }
         return out
+    }
+
+    // MARK: - Queue append (iOS 26+ workaround)
+
+    /// Append a song without interrupting playback. Tries the native
+    /// `Queue.insert` first; on failure rebuilds the queue from
+    /// `managedSongQueue` and restores the current playback position.
+    private func appendSongToQueue(_ song: Song) async throws {
+        // Fast path: native insert (works pre-iOS 26).
+        do {
+            try await player.queue.insert(song, position: .tail)
+            managedSongQueue.append(song)
+            print("MusicController: appended via native insert")
+            return
+        } catch {
+            print("MusicController: native insert failed (\(error)), rebuilding queue")
+        }
+
+        // Snapshot the queue if we haven't been tracking (e.g. prior play was
+        // an album/playlist). Best-effort — entries that aren't Song-typed
+        // are silently dropped.
+        if managedSongQueue.isEmpty {
+            for entry in player.queue.entries {
+                if case .song(let s) = entry.item { managedSongQueue.append(s) }
+            }
+            print("MusicController: snapshotted \(managedSongQueue.count) songs from queue")
+        }
+
+        let wasPlaying = player.state.playbackStatus == .playing
+        let savedTime = player.playbackTime
+
+        managedSongQueue.append(song)
+
+        // Find the currently-playing song so we rebuild from that point.
+        var currentIdx = 0
+        if let currentEntry = player.queue.currentEntry,
+           case .song(let currentSong) = currentEntry.item {
+            currentIdx = managedSongQueue.firstIndex(where: { $0.id == currentSong.id }) ?? 0
+        }
+
+        let remaining = Array(managedSongQueue.suffix(from: currentIdx))
+        managedSongQueue = remaining
+
+        if wasPlaying { player.pause() }
+
+        player.queue = .init(for: remaining)
+        try await player.prepareToPlay()
+        player.playbackTime = savedTime
+
+        if wasPlaying {
+            try await player.play()
+            pauseReason = nil
+            reduckIfVoiceSessionActive()
+        }
+        print("MusicController: appended via queue rebuild (\(remaining.count) tracks in queue)")
     }
 
     func setMusicMood(rawMood: String, instrumentalOverride: Bool?) async throws -> [String: Any] {
@@ -334,6 +415,7 @@ final class MusicController {
 
         if let song = song {
             print("MusicController: setMusicMood queueing song \"\(song.title)\"")
+            managedSongQueue = [song]
             player.queue = .init(for: [song])
             captureNowPlaying(title: song.title,
                               artist: song.artistName,
@@ -367,6 +449,7 @@ final class MusicController {
 
         if let playlist = response.playlists.first {
             print("MusicController: setMusicMood queueing playlist \"\(playlist.name)\"")
+            managedSongQueue = []
             player.queue = .init(for: [playlist])
             captureNowPlaying(title: playlist.name,
                               artist: playlist.curatorName,
@@ -499,6 +582,7 @@ final class MusicController {
         pauseReason = .userExplicit
         resumeToken = nil
         nowPlaying = nil
+        managedSongQueue = []
         AgentActivityLog.shared.log(.status, "stopped music")
     }
 
@@ -551,11 +635,26 @@ final class MusicController {
             }
         }
 
-        let playlist = try await MusicLibrary.shared.createPlaylist(
-            name: name,
-            description: description,
-            items: resolved
-        )
+        // Try combined creation first; fall back to two-step for iOS 27+
+        // where the combined response decoder may be out of sync.
+        let playlist: Playlist
+        do {
+            playlist = try await MusicLibrary.shared.createPlaylist(
+                name: name,
+                description: description,
+                items: resolved
+            )
+        } catch {
+            print("MusicController: createPlaylist combined call failed — \(error)")
+            playlist = try await MusicLibrary.shared.createPlaylist(
+                name: name,
+                description: description,
+                items: [] as [Song]
+            )
+            if !resolved.isEmpty {
+                try await MusicLibrary.shared.add(resolved, to: playlist)
+            }
+        }
 
         AgentActivityLog.shared.log(.status,
             "created playlist \"\(name)\" with \(resolved.count) tracks")
