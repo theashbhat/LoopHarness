@@ -57,10 +57,9 @@ struct LoopAppShortcuts: AppShortcutsProvider {
             AppShortcut(
                 intent: AskLoopIntent(),
                 phrases: [
-                    "Ask \(.applicationName) \(\.$query)",
-                    "Hey \(.applicationName) \(\.$query)",
-                    "Tell \(.applicationName) \(\.$query)",
-                    "Ask \(.applicationName)"
+                    "Ask \(.applicationName)",
+                    "Hey \(.applicationName)",
+                    "Tell \(.applicationName)"
                 ],
                 shortTitle: "Ask Loop",
                 systemImageName: "bubble.left.fill"
@@ -80,9 +79,9 @@ struct LoopAppShortcuts: AppShortcutsProvider {
             AppShortcut(
                 intent: LoopRememberIntent(),
                 phrases: [
-                    "Remember \(\.$note) with \(.applicationName)",
-                    "\(.applicationName) remember \(\.$note)",
-                    "Note \(\.$note) in \(.applicationName)"
+                    "Remember with \(.applicationName)",
+                    "\(.applicationName) remember this",
+                    "Note in \(.applicationName)"
                 ],
                 shortTitle: "Remember with Loop",
                 systemImageName: "note.text"
@@ -91,9 +90,9 @@ struct LoopAppShortcuts: AppShortcutsProvider {
             AppShortcut(
                 intent: SearchLoopIntent(),
                 phrases: [
-                    "Search \(.applicationName) for \(\.$query)",
-                    "Find in \(.applicationName) \(\.$query)",
-                    "What did \(.applicationName) say about \(\.$query)"
+                    "Search \(.applicationName)",
+                    "Find in \(.applicationName)",
+                    "Search with \(.applicationName)"
                 ],
                 shortTitle: "Search Loop",
                 systemImageName: "magnifyingglass"
