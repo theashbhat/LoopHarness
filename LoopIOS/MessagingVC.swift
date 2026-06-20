@@ -663,6 +663,17 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             object: nil
         )
 
+        // When iCloud sync (or pass-2 hydration) updates the store, re-read
+        // the current conversation's messages so the UI self-heals after a
+        // cold restart or cross-device push. Guarded inside the handler to
+        // avoid clobbering an in-flight agent turn.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleConversationStoreDidChange),
+            name: .conversationStoreDidChange,
+            object: nil
+        )
+
         // Cover writers that go through iCloudKVSDefaults directly (e.g. the
         // OnboardingCoordinator's voice-step writes to `audioMuted` and
         // `ttsProvider`) — without this, picking a voice during onboarding
@@ -826,6 +837,10 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         if let conversation = conversationManager.loadLastConversation() {
             print("🚀 Found last conversation: \(conversation.title)")
             currentConversationEntity = conversation
+            // Tell the store to hydrate this conversation first so the user
+            // doesn't stare at a blank screen while 50 other conversations
+            // get parsed ahead of the one they're looking at.
+            ConversationFileStore.shared.prioritizeHydration(id: conversation.id)
             loadMessagesFromConversation(conversation)
         } else {
             print("🚀 No last conversation found, starting with default message")
@@ -840,7 +855,27 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
         
         let messageEntities = conversationManager.getMessages(for: conversation)
         print("🔄 Retrieved \(messageEntities.count) messages from storage")
-        
+
+        // Defensive: if the store returned zero messages but the conversation
+        // has a recent updatedAt (implying content exists on disk that hasn't
+        // been hydrated yet), skip the clear-and-reload to avoid flashing a
+        // blank screen. The store will post .conversationStoreDidChange once
+        // hydration finishes, and handleConversationStoreDidChange will retry.
+        if messageEntities.isEmpty && !conversation.messages.isEmpty {
+            print("⚠️ Store returned 0 messages but conversation metadata suggests content exists — deferring render until hydration completes")
+            return
+        }
+        if messageEntities.isEmpty && conversation.updatedAt.timeIntervalSinceNow > -86400 * 365 {
+            // Even if conversation.messages is empty (meta-only stub), a
+            // conversation updated within the last year likely has content.
+            // If the store isn't hydrated yet, request hydration and bail.
+            if !ConversationFileStore.shared.isHydrated(id: conversation.id) {
+                print("⚠️ Conversation not yet hydrated — requesting async hydration")
+                ConversationFileStore.shared.requestHydrationIfNeeded(id: conversation.id)
+                return
+            }
+        }
+
         // Clear existing messages except system message
         messages = [messages[0]] // Keep system message
         
@@ -859,6 +894,7 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
             self.scrollToLastMessage()
             self.messagesDidReload()
         }
+        messagesDidReload()
 
         // For a VM-backed conversation, the assistant turn is written remotely
         // by the daemon, so the local cache can lag what's on the VM (e.g. a
@@ -1196,6 +1232,45 @@ When the user asks how you work, what you can do, or how you're built, read `ABO
     
     func newMessageSent() {
 
+    }
+
+    /// Called after `loadMessagesFromConversation` finishes populating
+    /// `self.messages` and reloading the table. Subclasses (MainVC) override
+    /// to refresh orb visibility so the hero/nav-bar handoff stays correct
+    /// on every message-load path — not just `loadConversation` and
+    /// `newMessageSent`.
+    func messagesDidReload() {
+    }
+
+    // MARK: - Store change observation
+
+    /// Re-read the current conversation from the store when iCloud sync or
+    /// pass-2 hydration updates it. Skips the reload when an agent turn is
+    /// in flight (streaming partial or thinking) to avoid clobbering live
+    /// state that hasn't been flushed to disk yet.
+    @objc private func handleConversationStoreDidChange() {
+        guard let current = currentConversationEntity else { return }
+
+        // Don't clobber an in-flight agent turn whose data lives only in
+        // memory (streamingPartial, ai_state). The store will eventually
+        // have it once the turn completes; we'll pick it up on the next
+        // notification.
+        if ai_state != .None || !streamingPartial.isEmpty { return }
+
+        let freshMessages = conversationManager.getMessages(for: current)
+        let currentCount = messages.count - 1 // minus system message
+
+        // Only reload if the store has *more* content than what's on screen.
+        // This avoids pointless reloads for unrelated conversations and
+        // prevents replacing a populated screen with fewer messages during
+        // a transient cache state.
+        guard freshMessages.count > currentCount else { return }
+
+        // Re-read the conversation entity so our snapshot is current.
+        if let fresh = conversationManager.getConversation(by: current.id) {
+            currentConversationEntity = fresh
+            loadMessagesFromConversation(fresh, refreshIfRemote: false)
+        }
     }
 
 
