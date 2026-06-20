@@ -37,6 +37,9 @@ final class FeedCardStackView: UIView {
 
     private let maxVisible = 3
     private let swipeThreshold: CGFloat = 100
+    /// True while a pan is actively driving the top card, so layout passes don't
+    /// stomp the drag transform back to identity mid-gesture.
+    private var isDragging = false
     /// Vertical peek + scale falloff per depth level behind the top card.
     private let peekOffset: CGFloat = 14
     private let scaleStep: CGFloat = 0.06
@@ -114,6 +117,9 @@ final class FeedCardStackView: UIView {
     private func applyStackTransforms(animated: Bool) {
         let apply = {
             for (depth, cardView) in self.cardViews.enumerated() {
+                // Never reset the top card while the user is dragging it — the
+                // pan handler owns its transform until the gesture ends.
+                if depth == 0 && self.isDragging { continue }
                 if depth == 0 {
                     // Top card rests at full size, centered. (During a drag the
                     // pan handler owns this transform; this method isn't called
@@ -147,6 +153,9 @@ final class FeedCardStackView: UIView {
         let translation = gesture.translation(in: self)
 
         switch gesture.state {
+        case .began:
+            isDragging = true
+
         case .changed:
             let rotation = (translation.x / max(bounds.width, 1)) * 0.32 // up to ~18°
             // Set the translation components explicitly so the card always
@@ -156,14 +165,15 @@ final class FeedCardStackView: UIView {
             t.ty = translation.y * 0.4
             top.transform = t
 
-        case .ended, .cancelled:
+        case .ended, .cancelled, .failed:
+            isDragging = false
             let velocity = gesture.velocity(in: self)
             if translation.x > swipeThreshold || velocity.x > 800 {
                 fling(top, toRight: true)
             } else if translation.x < -swipeThreshold || velocity.x < -800 {
                 fling(top, toRight: false)
             } else {
-                // Snap back.
+                // Below threshold: snap back to the resting (centered) position.
                 UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.7,
                                initialSpringVelocity: 0, options: [.allowUserInteraction]) {
                     top.transform = .identity
