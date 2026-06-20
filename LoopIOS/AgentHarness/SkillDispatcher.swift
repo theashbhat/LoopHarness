@@ -42,16 +42,43 @@ final class SkillDispatcher {
     /// result message (role: "function") exactly once, on whichever queue the
     /// underlying skill resolves on (typically the main queue — same as the
     /// chat-UI path).
+    ///
+    /// The call runs through `ToolCallGuard` first. If the guard detects a
+    /// duplicate / looping call it short-circuits with a synthetic error and
+    /// the real skill never executes — saving API quota and preventing the
+    /// model from burning tokens re-fetching data it already has.
     func dispatch(_ call: FunctionCallStruct,
                   completion: @escaping (MessageStruct) -> Void) {
+
+        // --- Anti-loop guard (layers 1–3) ---
+        let verdict = ToolCallGuard.shared.evaluate(call: call)
+        switch verdict {
+        case .block(var result, _):
+            if result.callId == nil { result.callId = call.callId }
+            if result.name == nil   { result.name   = call.name }
+            completion(result)
+            return
+        case .allow:
+            break
+        }
+
+        // Wrap the downstream completion so we can record the result for
+        // the guard's result-diff layer before handing it back to the caller.
+        let guardedCompletion: (MessageStruct) -> Void = { result in
+            ToolCallGuard.shared.recordResult(
+                call: call,
+                resultContent: result.content
+            )
+            completion(result)
+        }
 
         // Built-in skills first — direct references keep this branchless and
         // avoid the runtime-registration overhead for the common case.
         if NotionSkill.shared.handles(functionName: call.name) {
-            NotionSkill.shared.handle(functionCall: call, completion: completion); return
+            NotionSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if SlackSkill.shared.handles(functionName: call.name) {
-            SlackSkill.shared.handle(functionCall: call, completion: completion); return
+            SlackSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if SchedulerSkill.shared.handles(functionName: call.name) {
             // Scheduling from inside a scheduled-task run is disallowed at
@@ -66,73 +93,73 @@ final class SkillDispatcher {
                 ))
                 return
             }
-            SchedulerSkill.shared.handle(functionCall: call, completion: completion); return
+            SchedulerSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if ExaSkill.shared.handles(functionName: call.name) {
-            ExaSkill.shared.handle(functionCall: call, completion: completion); return
+            ExaSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if URLFetchSkill.shared.handles(functionName: call.name) {
-            URLFetchSkill.shared.handle(functionCall: call, completion: completion); return
+            URLFetchSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if GitSkill.shared.handles(functionName: call.name) {
-            GitSkill.shared.handle(functionCall: call, completion: completion); return
+            GitSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if GitHubSkill.shared.handles(functionName: call.name) {
-            GitHubSkill.shared.handle(functionCall: call, completion: completion); return
+            GitHubSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if SelfImprovementSkill.shared.handles(functionName: call.name) {
-            SelfImprovementSkill.shared.handle(functionCall: call, completion: completion); return
+            SelfImprovementSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if FileSystemSkill.shared.handles(functionName: call.name) {
-            FileSystemSkill.shared.handle(functionCall: call, completion: completion); return
+            FileSystemSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if SpecBuilderSkill.shared.handles(functionName: call.name) {
-            SpecBuilderSkill.shared.handle(functionCall: call, completion: completion); return
+            SpecBuilderSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if LocationSkill.shared.handles(functionName: call.name) {
-            LocationSkill.shared.handle(functionCall: call, completion: completion); return
+            LocationSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if MapsSkill.shared.handles(functionName: call.name) {
-            MapsSkill.shared.handle(functionCall: call, completion: completion); return
+            MapsSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if GeocodingSkill.shared.handles(functionName: call.name) {
-            GeocodingSkill.shared.handle(functionCall: call, completion: completion); return
+            GeocodingSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if ImageSkill.shared.handles(functionName: call.name) {
-            ImageSkill.shared.handle(functionCall: call, completion: completion); return
+            ImageSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if PDFSkill.shared.handles(functionName: call.name) {
-            PDFSkill.shared.handle(functionCall: call, completion: completion); return
+            PDFSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if ObsidianSkill.shared.handles(functionName: call.name) {
-            ObsidianSkill.shared.handle(functionCall: call, completion: completion); return
+            ObsidianSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if CalendarSkill.shared.handles(functionName: call.name) {
-            CalendarSkill.shared.handle(functionCall: call, completion: completion); return
+            CalendarSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if MusicSkill.shared.handles(functionName: call.name) {
-            MusicSkill.shared.handle(functionCall: call, completion: completion); return
+            MusicSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if SkillBuilderSkill.shared.handles(functionName: call.name) {
-            SkillBuilderSkill.shared.handle(functionCall: call, completion: completion); return
+            SkillBuilderSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if IntegrationSkill.shared.handles(functionName: call.name) {
-            IntegrationSkill.shared.handle(functionCall: call, completion: completion); return
+            IntegrationSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if NavigationSkill.shared.handles(functionName: call.name) {
-            NavigationSkill.shared.handle(functionCall: call, completion: completion); return
+            NavigationSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if CursorSkill.shared.handles(functionName: call.name) {
-            CursorSkill.shared.handle(functionCall: call, completion: completion); return
+            CursorSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if DevinSkill.shared.handles(functionName: call.name) {
-            DevinSkill.shared.handle(functionCall: call, completion: completion); return
+            DevinSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if TwitterSkill.shared.handles(functionName: call.name) {
-            TwitterSkill.shared.handle(functionCall: call, completion: completion); return
+            TwitterSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if SSHSkill.shared.handles(functionName: call.name) {
-            SSHSkill.shared.handle(functionCall: call, completion: completion); return
+            SSHSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if VMCronSkill.shared.handles(functionName: call.name) {
             // Like SchedulerSkill, scheduling from inside a headless scheduled
@@ -145,34 +172,34 @@ final class SkillDispatcher {
                 ))
                 return
             }
-            VMCronSkill.shared.handle(functionCall: call, completion: completion); return
+            VMCronSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if MuniRealtimeSkill.shared.handles(functionName: call.name) {
-            MuniRealtimeSkill.shared.handle(functionCall: call, completion: completion); return
+            MuniRealtimeSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if CardSkill.shared.handles(functionName: call.name) {
             CardSkill.shared.handle(functionCall: call, completion: completion); return
         }
         if GoogleDriveSkill.shared.handles(functionName: call.name) {
-            GoogleDriveSkill.shared.handle(functionCall: call, completion: completion); return
+            GoogleDriveSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if GoogleGmailSkill.shared.handles(functionName: call.name) {
-            GoogleGmailSkill.shared.handle(functionCall: call, completion: completion); return
+            GoogleGmailSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if GoogleCalendarSkill.shared.handles(functionName: call.name) {
-            GoogleCalendarSkill.shared.handle(functionCall: call, completion: completion); return
+            GoogleCalendarSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if AgentMailSkill.shared.handles(functionName: call.name) {
             AgentMailSkill.shared.handle(functionCall: call, completion: completion); return
         }
         #if canImport(HealthKit) && os(iOS)
         if HealthSkill.shared.handles(functionName: call.name) {
-            HealthSkill.shared.handle(functionCall: call, completion: completion); return
+            HealthSkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         #endif
         #if os(iOS)
         if StorySkill.shared.handles(functionName: call.name) {
-            StorySkill.shared.handle(functionCall: call, completion: completion); return
+            StorySkill.shared.handle(functionCall: call, completion: guardedCompletion); return
         }
         if BrowseSkill.shared.handles(functionName: call.name) {
             BrowseSkill.shared.handle(functionCall: call, completion: completion); return
@@ -185,14 +212,14 @@ final class SkillDispatcher {
         let snapshot = registered
         lock.unlock()
         for entry in snapshot where entry.handles(call.name) {
-            entry.handle(call, completion)
+            entry.handle(call, guardedCompletion)
             return
         }
 
         // Dynamic (user-authored JS) skills last — they're hot-loaded so the
         // registry is the source of truth for what's currently available.
         if DynamicSkillRegistry.shared.handles(functionName: call.name) {
-            DynamicSkillRegistry.shared.handle(functionCall: call, completion: completion)
+            DynamicSkillRegistry.shared.handle(functionCall: call, completion: guardedCompletion)
             return
         }
 
@@ -200,7 +227,7 @@ final class SkillDispatcher {
         // namespaced `<server>__<tool>` so they can't collide with anything
         // checked above.
         if MCPRegistry.shared.handles(functionName: call.name) {
-            MCPRegistry.shared.handle(functionCall: call, completion: completion)
+            MCPRegistry.shared.handle(functionCall: call, completion: guardedCompletion)
             return
         }
 

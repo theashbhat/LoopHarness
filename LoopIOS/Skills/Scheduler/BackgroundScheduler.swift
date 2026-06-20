@@ -559,6 +559,10 @@ final class BackgroundScheduler {
         let startedAt = Date()
         isRunningHeadless = true
 
+        // Fresh scheduled job — reset the anti-loop guard so prior state
+        // from interactive use doesn't falsely flag this run's tool calls.
+        ToolCallGuard.shared.resetForNewTurn()
+
         // Fresh conversation so the user can scroll back to past briefings via
         // the normal conversation list. Title doubles as the notification's
         // visible title.
